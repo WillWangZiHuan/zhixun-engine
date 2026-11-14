@@ -10,7 +10,7 @@ import json
 import os
 import shutil
 import sys
-import time
+import importlib
 
 os.environ.update(OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1', MKL_NUM_THREADS='1')
 import numpy as np
@@ -18,8 +18,8 @@ from baselines.data import read_dataset, json_value
 from .checkpoint import load_checkpoint, kind, core, MAX_BYTES
 from .experiment_agent.program import default_program
 from .experiment_agent.task_tools import _validate_proposal
-from .experiment_agent.driver import decide, validate_prices
-from .experiment_agent.unified_protocol import parse, NUMERICAL_FUNCTIONS
+from .workspace_policy import decide
+from .experiment_agent.unified_protocol import NUMERICAL_FUNCTIONS
 from .experiment_agent.runtime import supervise
 
 
@@ -60,24 +60,19 @@ def preflight(args):
     for n,event in enumerate(history,1):
         if not isinstance(event,dict) or event.get('round_index')!=n:raise ValueError('History must contain ordered actual round_index records')
         if event.get('decision') not in ('promote','keep','retain'):raise ValueError('Actual platform decision required in history')
-    prices=json_value(args.price_record.read_text());validate_prices(prices)
-    if not os.environ.get('PYTRIO_API_KEY'):raise ValueError('PYTRIO_API_KEY required; no fixed-rule fallback')
-    from .policy_worker import load_tokenizer
-    old=os.environ.get('PYTRIO_TOKENIZER_PATH')
-    try:
-        os.environ['PYTRIO_TOKENIZER_PATH']=str(args.tokenizer.resolve());load_tokenizer()
-    finally:
-        if old is None:os.environ.pop('PYTRIO_TOKENIZER_PATH',None)
-        else:os.environ['PYTRIO_TOKENIZER_PATH']=old
-    return model,train,valid,history,prices,{name:digest(path) for name,path in inputs.items()}
+    return model,train,valid,history,{name:digest(path) for name,path in inputs.items()}
 
 
-def run(args):
-    model,train,valid,history,prices,hashes=preflight(args)
+def run(args, workspace_io=None):
+    model,train,valid,history,hashes=preflight(args)
     if args.check:
         return dict(valid=True,round_index=args.round,profile=args.task,policy='qwen',
                     device_metadata_required=False,device_split_verified=False,
                     model_calls=0,training_started=False)
+    if workspace_io is None:
+        workspace_io=importlib.import_module('workspace_io')
+    if not callable(getattr(workspace_io,'model',None)):
+        raise ValueError('Platform workspace_io.model callable required')
     root=args.output.resolve();root.mkdir();(root/'calls').mkdir();(root/'evidence').mkdir()
     shutil.copyfile(args.history,root/'evidence/platform-history.jsonl')
     write(root/'evidence/input-hashes.json',hashes)
@@ -98,11 +93,8 @@ def run(args):
               numerical_functions=NUMERICAL_FUNCTIONS,device_groups=None,
               data_contract='id/inputs/answer only; meta excluded from learning and prediction',
               adoption_authority='external evaluator; supplied parent is authoritative')
-    os.environ['PYTRIO_TOKENIZER_PATH']=str(args.tokenizer.resolve())
     try:
-        action,billing=decide(root/'calls/call-01',view,python=sys.executable,prices=prices,
-                              task_deadline=time.monotonic()+180,
-                              worker_module='zhixun.round_policy_worker',decision_parser=parse)
+        action,billing=decide(root/'calls/call-01',view,workspace_io)
         proposal=action['proposal'];_validate_proposal(proposal,args.task)
         case=root/'work';case.mkdir()
         shutil.copyfile(args.parent,case/'parent.npz')
@@ -142,7 +134,7 @@ def run(args):
     except Exception as error:
         write(root/'result.json',dict(status='failed',error_type=type(error).__name__,
                                      fixed_rule_fallback=False,checkpoint_exported=False,
-                                     error_message=str(error).replace(os.environ.get('PYTRIO_API_KEY') or '\0','[REDACTED]')[:2000]))
+                                     evidence='calls/call-01 and work preserve available failure records'))
         raise
 
 
@@ -150,7 +142,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--task',choices=list('ABC'),required=True)
     parser.add_argument('--round',type=int,required=True)
-    for name in ('parent','train','validation','history','output','price-record','tokenizer'):
+    for name in ('parent','train','validation','history','output'):
         parser.add_argument('--'+name,type=Path,required=True)
     parser.add_argument('--cpu-seconds',type=int,default=20)
     parser.add_argument('--check',action='store_true')

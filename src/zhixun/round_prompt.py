@@ -1,7 +1,4 @@
-"""Real designated-model proposal for one externally selected parent."""
-import sys
-from .experiment_worker import sample
-
+"""Single-round decision instructions, independent of transport."""
 PROMPT = '''You propose ONE real CPU continuation experiment for the supplied industrial model.
 A is six-class gas classification (maximize Macro-F1); B is bearing RUL in minutes and C engine RUL in cycles (minimize RMSE). The external evaluator chooses the next parent. You must use the supplied parent and actual supplied history, including rejected and untrained rounds. Do not assume the last candidate was adopted. Previous hypotheses are unverified.
 Return exactly one bare JSON object with tool=experiment, reflection, and proposal. proposal contains operation="core_code", hypothesis, expected_result, falsifier, and program. No Markdown or extra text. program defines exactly five pure numerical functions with these exact signatures:
@@ -12,6 +9,3 @@ Classification loss receives raw six-class logits and integer labels and returns
 An optional supplement may be {"kind":"steady_head"} for A only if the inherited head is not fitted, or {"kind":"residual_trees","trees":1..80,"learning_rate":1e-6..1} for C. Core is continued first. Existing fitted heads/trees are retained; residual trees append to the existing forest using the updated core, with the SAME explicitly submitted sample-weight function. B has no supplement. Supplement omission preserves inherited components. Complete native model states are exported, not stripped to core-only. A may include readout_expression, preserving its existing capability: return six finite nonnegative class weights from per-row readonly raw, x, hidden, logits, base_prob, classes. base_prob is the same-trial continued upstream. No labels, IDs, metadata or I/O. Allow numerical literals, these names, lists/tuples, indexing/slices, arithmetic + - * / ** & |, unary operations, single comparisons, and np.abs square sqrt log1p exp tanh sin cos minimum maximum clip where mean std sum max min argmax concatenate stack, axis/keepdims keywords only. Limits 1800 characters,400 AST nodes,256 sequence items,4096 intermediate elements,ndim<=2,literal magnitude<=10000,exponent magnitude<=8. Output is normalized; omitting expression retains inherited readout. No preferred formula or class pair is supplied.
 No local acceptance replaces the evaluator's decision. Return one proposal now; do not request inspections or finish. Explain limitations without claiming causality, hidden-test gains or measured improvement before the experiment executes.
 '''
-
-if __name__ == '__main__':
-    sample(sys.argv[1], PROMPT, json_prefix=True)

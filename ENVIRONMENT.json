@@ -1,4 +1,12 @@
 {
+  "local_python": "3.13.5 | packaged by Anaconda, Inc. | (main, Jun 12 2025, 11:23:37) [Clang 14.0.6 ]",
+  "local_platform": "macOS-15.5-arm64-arm-64bit-Mach-O",
+  "local_dependencies": {
+    "numpy": "2.5.4",
+    "scipy": "1.18.1",
+    "scikit-learn": "1.9.1",
+    "lightgbm": "4.7.0"
+  },
   "image_dependencies": {
     "numpy": "1.26.4",
     "pytrio": "0.2.9",
@@ -6,25 +14,6 @@
     "scikit-learn": "1.9.1",
     "lightgbm": "4.7.0"
   },
-  "local_verification": {
-    "scope": "Actual local verification environment; not a Docker environment or a portable lockfile",
-    "python": "3.13.5 | packaged by Anaconda, Inc. | (main, Jun 12 2025, 11:23:37) [Clang 14.0.6 ]",
-    "platform": "macOS-15.5-arm64-arm-64bit-Mach-O",
-    "dependencies": {
-      "numpy": "2.5.4",
-      "scipy": "1.18.1",
-      "scikit-learn": "1.9.1",
-      "lightgbm": "4.7.0",
-      "pytrio": "0.2.9",
-      "transformers": "5.22.2",
-      "tokenizers": "0.23.3"
-    },
-    "no_dependency_installs": true,
-    "credentials_included": false,
-    "tokenizer_included": false,
-    "models_included": false,
-    "historical_egg_info_excluded": true
-  },
-  "image_python": "3.12.16",
-  "docker_lifecycle_verified": false
+  "dependency_installs_this_task": 0,
+  "live_workspace_io_delivery_verified": false
 }
