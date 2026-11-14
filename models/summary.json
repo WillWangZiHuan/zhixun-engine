@@ -1,0 +1,284 @@
+{
+  "complete": true,
+  "scope": "historical old-rule training summary; current files are lossless native conversions; no new training",
+  "model_api_calls": 0,
+  "platform_evaluations": 0,
+  "tasks": {
+    "A": {
+      "status": "completed",
+      "initial_metrics": {
+        "accuracy": 0.8786173633440515,
+        "macro_f1": 0.7140297220788709,
+        "confusion": [
+          [
+            158,
+            5,
+            1,
+            0,
+            0,
+            0
+          ],
+          [
+            32,
+            302,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            100,
+            0,
+            0,
+            0
+          ],
+          [
+            108,
+            0,
+            0,
+            0,
+            0,
+            1
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            528,
+            4
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            5
+          ]
+        ],
+        "recall": {
+          "Ethanol": {
+            "correct": 158,
+            "n": 164,
+            "recall": 0.9634146341463414
+          },
+          "Ethylene": {
+            "correct": 302,
+            "n": 334,
+            "recall": 0.9041916167664671
+          },
+          "Ammonia": {
+            "correct": 100,
+            "n": 100,
+            "recall": 1.0
+          },
+          "Acetaldehyde": {
+            "correct": 0,
+            "n": 109,
+            "recall": 0.0
+          },
+          "Acetone": {
+            "correct": 528,
+            "n": 532,
+            "recall": 0.9924812030075187
+          },
+          "Toluene": {
+            "correct": 5,
+            "n": 5,
+            "recall": 1.0
+          }
+        },
+        "worst_class_recall": 0.0
+      },
+      "final_metrics": {
+        "accuracy": 0.8754019292604501,
+        "macro_f1": 0.7893797528163713,
+        "confusion": [
+          [
+            50,
+            5,
+            1,
+            108,
+            0,
+            0
+          ],
+          [
+            28,
+            306,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            100,
+            0,
+            0,
+            0
+          ],
+          [
+            8,
+            0,
+            0,
+            100,
+            0,
+            1
+          ],
+          [
+            0,
+            0,
+            0,
+            2,
+            528,
+            2
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            5
+          ]
+        ],
+        "recall": {
+          "Ethanol": {
+            "correct": 50,
+            "n": 164,
+            "recall": 0.3048780487804878
+          },
+          "Ethylene": {
+            "correct": 306,
+            "n": 334,
+            "recall": 0.9161676646706587
+          },
+          "Ammonia": {
+            "correct": 100,
+            "n": 100,
+            "recall": 1.0
+          },
+          "Acetaldehyde": {
+            "correct": 100,
+            "n": 109,
+            "recall": 0.9174311926605505
+          },
+          "Acetone": {
+            "correct": 528,
+            "n": 532,
+            "recall": 0.9924812030075187
+          },
+          "Toluene": {
+            "correct": 5,
+            "n": 5,
+            "recall": 1.0
+          }
+        },
+        "worst_class_recall": 0.3048780487804878
+      },
+      "rounds": 10,
+      "core_epochs_executed": 9,
+      "head_fits_executed": 1,
+      "accepted": 2,
+      "selected_round": 10,
+      "wall_seconds": 14.447946485131979,
+      "model_api_calls": 0,
+      "platform_evaluations": 0,
+      "official_score": false,
+      "checkpoint": "A/checkpoint.npz",
+      "checkpoint_format": "zhixun.native-checkpoint.v1"
+    },
+    "B": {
+      "status": "completed",
+      "initial_metrics": {
+        "rmse": 681.1598326043113,
+        "mae": 563.1058414514887
+      },
+      "final_metrics": {
+        "rmse": 561.6224263047773,
+        "mae": 487.5962585399111
+      },
+      "rounds": 10,
+      "accepted": 2,
+      "training_epochs_executed": 10,
+      "optimizer_steps_executed": 1100,
+      "unique_candidate_checkpoints": 10,
+      "selected_checkpoint_sha256": "sha256:ce619650f82ba07c462f4f6e4995f56f07091d80f792fc2267c9ea19b8e50fa8",
+      "source_unchanged": true,
+      "official_score": false,
+      "model_api_calls": 0,
+      "estimated_uncached_cny": 0,
+      "actual_bill": false,
+      "platform_evaluations": 0,
+      "checkpoint": "B/checkpoint.npz",
+      "checkpoint_format": "zhixun.native-checkpoint.v1"
+    },
+    "C": {
+      "status": "completed",
+      "initial_metrics": {
+        "rmse": 52.86857256611151,
+        "mae": 38.89982982666355,
+        "groups": {
+          "FD001": {
+            "n": 3210,
+            "rmse": 42.83453261937968
+          },
+          "FD002": {
+            "n": 7581,
+            "rmse": 41.152059506011675
+          },
+          "FD003": {
+            "n": 3555,
+            "rmse": 55.355939500721526
+          },
+          "FD004": {
+            "n": 8703,
+            "rmse": 63.23679488033417
+          }
+        },
+        "worst_group_rmse": 63.23679488033417
+      },
+      "final_metrics": {
+        "rmse": 48.66943264335024,
+        "mae": 34.07465576483691,
+        "groups": {
+          "FD001": {
+            "n": 3210,
+            "rmse": 37.312893102152955
+          },
+          "FD002": {
+            "n": 7581,
+            "rmse": 39.80669920706795
+          },
+          "FD003": {
+            "n": 3555,
+            "rmse": 50.58144378385923
+          },
+          "FD004": {
+            "n": 8703,
+            "rmse": 57.744277758850096
+          }
+        },
+        "worst_group_rmse": 57.744277758850096
+      },
+      "rounds": 10,
+      "accepted": 10,
+      "tree_iterations_executed": 800,
+      "selected_round": 10,
+      "wall_seconds": 218.8344717361033,
+      "model_api_calls": 0,
+      "platform_evaluations": 0,
+      "official_score": false,
+      "checkpoint": "C/checkpoint.npz",
+      "checkpoint_format": "zhixun.native-checkpoint.v1"
+    }
+  },
+  "reference_models_only": true,
+  "platform_supplied_parent": false,
+  "new_training": 0,
+  "original_summary_sha256": "ea4e87bb6e30f99a0bb4bd925da9cba122e57acb69eddb5989ecdfa6b942fa6f"
+}

@@ -1,0 +1,148 @@
+{
+  "format": "zhixun.model-set.v1",
+  "tasks": {
+    "A": {
+      "checkpoint": "A/checkpoint.npz",
+      "format": "zhixun.native-checkpoint.v1",
+      "development_metrics": {
+        "accuracy": 0.8754019292604501,
+        "macro_f1": 0.7893797528163713,
+        "confusion": [
+          [
+            50,
+            5,
+            1,
+            108,
+            0,
+            0
+          ],
+          [
+            28,
+            306,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            100,
+            0,
+            0,
+            0
+          ],
+          [
+            8,
+            0,
+            0,
+            100,
+            0,
+            1
+          ],
+          [
+            0,
+            0,
+            0,
+            2,
+            528,
+            2
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            5
+          ]
+        ],
+        "recall": {
+          "Ethanol": {
+            "correct": 50,
+            "n": 164,
+            "recall": 0.3048780487804878
+          },
+          "Ethylene": {
+            "correct": 306,
+            "n": 334,
+            "recall": 0.9161676646706587
+          },
+          "Ammonia": {
+            "correct": 100,
+            "n": 100,
+            "recall": 1.0
+          },
+          "Acetaldehyde": {
+            "correct": 100,
+            "n": 109,
+            "recall": 0.9174311926605505
+          },
+          "Acetone": {
+            "correct": 528,
+            "n": 532,
+            "recall": 0.9924812030075187
+          },
+          "Toluene": {
+            "correct": 5,
+            "n": 5,
+            "recall": 1.0
+          }
+        },
+        "worst_class_recall": 0.3048780487804878
+      },
+      "kind": "steady_pair",
+      "sha256": "21aeac9b18ded8a308ed9c9ae45ec6ed5c25806ddd8e1f323b4079fb34f142c0",
+      "reference_only": true
+    },
+    "B": {
+      "checkpoint": "B/checkpoint.npz",
+      "format": "zhixun.native-checkpoint.v1",
+      "development_metrics": {
+        "rmse": 561.6224263047773,
+        "mae": 487.5962585399111
+      },
+      "kind": "core",
+      "sha256": "9bc123aef24062f0b130ec5ab44574fa71e59ee6e2432c66fc2216dd87ff8665",
+      "reference_only": true
+    },
+    "C": {
+      "checkpoint": "C/checkpoint.npz",
+      "format": "zhixun.native-checkpoint.v1",
+      "development_metrics": {
+        "rmse": 48.66943264335024,
+        "mae": 34.07465576483691,
+        "groups": {
+          "FD001": {
+            "n": 3210,
+            "rmse": 37.312893102152955
+          },
+          "FD002": {
+            "n": 7581,
+            "rmse": 39.80669920706795
+          },
+          "FD003": {
+            "n": 3555,
+            "rmse": 50.58144378385923
+          },
+          "FD004": {
+            "n": 8703,
+            "rmse": 57.744277758850096
+          }
+        },
+        "worst_group_rmse": 57.744277758850096
+      },
+      "kind": "residual_boost",
+      "sha256": "b37c127faaecf71f069ee3f13c0a3b855a11552e0e5afa6f27ba9cc827df781f",
+      "reference_only": true
+    }
+  },
+  "origin": "lossless native conversion of original v5 image old-rule reference models",
+  "hidden_test_verified": false,
+  "platform_protocol_verified": false,
+  "model_api_calls": 0,
+  "reference_models_only": true,
+  "platform_supplied_parent": false,
+  "new_training": 0,
+  "original_manifest_sha256": "ffb4af7aa9b0bc92e6c0da83be3a0a36d3c8125603064063df5793c4fe7cd9a1"
+}

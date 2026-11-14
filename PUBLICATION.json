@@ -1,0 +1,12 @@
+{
+  "format": "zhixun.publication.v1",
+  "prepared_at": "2026-11-14T07:30:54.300537+00:00",
+  "visibility_authorization": "User explicitly authorized public GitHub publication for competition review",
+  "source_snapshot_sha256": "7c659c6bab37d35eac86e8d1cbe25a78f8f90e6234f4cd89df4f6aade005b356",
+  "image_sha256": "8faf811bbe18cc170106db4d7a41baff43be801f5706020699169f7d103619bc",
+  "component_bytes_unchanged": 69,
+  "historical_provenance_preserved": true,
+  "platform_submission_saved": false,
+  "trial_started": false,
+  "formal_started": false
+}
