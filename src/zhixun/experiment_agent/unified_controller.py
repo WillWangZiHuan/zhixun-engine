@@ -3,7 +3,7 @@ from pathlib import Path
 import argparse,json,os,resource,sys,time
 os.environ.update(OPENBLAS_NUM_THREADS='1',OMP_NUM_THREADS='1',MKL_NUM_THREADS='1',BASELINE_CPU_THREADS='1')
 import numpy as np
-from .task_tools import prepare,observe,experiment,export_models,_state,_write,_cached,_metrics
+from .task_tools import prepare,observe,experiment,export_models,inspect_bundle,_state,_write,_cached,_metrics
 from .task_worker import load_checkpoint
 from .driver import decide, validate_prices, FORMAT
 from .unified_protocol import parse,NUMERICAL_FUNCTIONS,REFERENCE_RECIPES
@@ -258,43 +258,126 @@ def run_task(bundle,root,policy,cpu_budget,prices,*,resume=False):
     return summary
 
 
-def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--bundles',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--policy',choices=['rule','qwen'],required=True);p.add_argument('--cpu-budget',type=int,required=True);p.add_argument('--price-record',type=Path);p.add_argument('--tokenizer',type=Path);p.add_argument('--resume',action='store_true',help='Explicitly continue a saved pre-sampling failure without resetting budgets');a=p.parse_args()
-    if sys.platform!='linux':raise RuntimeError('Use the native Linux host')
-    os.sched_setaffinity(0,set(sorted(os.sched_getaffinity(0))[:4]));resource.setrlimit(resource.RLIMIT_AS,(8000000000,8000000000))
+def inspect_resume(args, workspace):
+    """Read-only validation of the exact saved run before any resumed work."""
+    if args.policy!='qwen':raise ValueError('Resume requires the explicitly selected qwen policy')
+    runs=workspace/'runs'
+    if not runs.is_dir() or (workspace/'summary.json').exists():
+        raise ValueError('Resume requires an incomplete workspace with runs/')
+    if (workspace/'models').exists() or (workspace/'models').is_symlink():
+        raise ValueError('Resume model output already exists; preserve it and investigate')
+    for directory in (workspace,runs):
+        if not os.access(directory,os.W_OK|os.X_OK):raise ValueError('Resume workspace must be writable')
+    results={};pending=set()
+    expected_files={'checkpoint.npz','baseline-info.json','training.json','history.jsonl','public/train.jsonl','public/validation.jsonl'}
+    import hashlib
+    for task in 'ABC':
+        root=runs/task
+        if not root.exists():continue
+        for directory in (root,root/'calls'):
+            if not directory.is_dir() or not os.access(directory,os.W_OK|os.X_OK):raise ValueError('Resume task directories must be writable')
+        for name in ('state.json','controller-summary.json'):
+            if not os.access(root/name,os.W_OK):raise ValueError('Resume state files must be writable')
+        supplied=json.loads((root/'input-evidence/source-hashes.json').read_text())
+        if set(supplied)!=expected_files:raise ValueError('Incomplete original input binding')
+        for name,digest in supplied.items():
+            if hashlib.sha256((args.bundles/task/name).read_bytes()).hexdigest()!=digest:
+                raise ValueError(f'Resume input changed: {task}/{name}')
+        summary=json.loads((root/'controller-summary.json').read_text());state=_state(root)
+        if summary.get('runtime_format')!=FORMAT or state.get('runtime_format')!=FORMAT:
+            raise ValueError('Resume accepts only this runtime format')
+        if summary['profile']!=task or summary['policy']!=args.policy or summary['cpu_budget']!=args.cpu_budget or len(state['events'])!=summary['experiments'] or state['selected_metrics']!=summary['final_metrics']:
+            raise ValueError('Existing task does not match requested run')
+        if summary['complete']:
+            if len(state['events'])!=10 or not summary['final_review']:raise ValueError('Completed task has missing experiments or review')
+            results[task]=summary
+        else:
+            resume_checkpoint(root,args.policy,args.cpu_budget);pending.add(task)
+    existing=[task for task in 'ABC' if (runs/task).exists()]
+    if len(pending)!=1 or existing!=list('ABC'[:len(existing)]) or next(iter(pending))!=existing[-1]:
+        raise ValueError('Expected one interrupted task after a completed task prefix')
+    return results,pending
+
+
+def preflight(args):
+    """Reject invalid launch inputs before creating outputs or sampling."""
+    if not 1<=args.cpu_budget<=600:raise ValueError('--cpu-budget must be in 1..600 seconds')
+    bundles=args.bundles.resolve();workspace=args.output.resolve()
+    if workspace==bundles or bundles in workspace.parents or workspace in bundles.parents:
+        raise ValueError('Input bundles and output workspace must not overlap')
+    if not args.resume and workspace.exists():raise ValueError('Output workspace must be new')
+    resume_plan=inspect_resume(args,workspace) if args.resume else ({},set())
+    if not args.resume and (not workspace.parent.is_dir() or not os.access(workspace.parent,os.W_OK|os.X_OK)):
+        raise ValueError('Output parent must exist and be writable')
     prices=None
-    if a.policy=='qwen':
-        if not a.price_record or not a.tokenizer or not os.environ.get('PYTRIO_API_KEY'):raise ValueError('Explicit price, tokenizer and runtime key required')
-        prices=json.loads(a.price_record.read_text());os.environ['PYTRIO_TOKENIZER_PATH']=str(a.tokenizer.resolve());os.environ.pop('SWANLAB_API_KEY',None)
-    output=a.output.resolve();results={};resume_tasks=set()
+    if args.policy=='qwen':
+        if not args.price_record or not args.tokenizer or not os.environ.get('PYTRIO_API_KEY'):
+            raise ValueError('Explicit --price-record, --tokenizer and runtime PYTRIO_API_KEY required')
+        prices=json.loads(args.price_record.read_text());validate_prices(prices)
+        previous=os.environ.get('PYTRIO_TOKENIZER_PATH')
+        try:
+            os.environ['PYTRIO_TOKENIZER_PATH']=str(args.tokenizer.resolve())
+            from ..policy_worker import load_tokenizer
+            load_tokenizer()  # local-only provenance and deserialization; no service call
+        finally:
+            if previous is None:os.environ.pop('PYTRIO_TOKENIZER_PATH',None)
+            else:os.environ['PYTRIO_TOKENIZER_PATH']=previous
+    tasks={}
+    for task in 'ABC':
+        data=inspect_bundle(bundles/task)
+        if data['profile']!=task:raise ValueError(f'Bundle directory {task} has the wrong profile')
+        tasks[task]=dict(train_rows=data['train_rows'],validation_rows=data['validation_rows'])
+    return prices,dict(valid=True,policy=args.policy,bundles=str(bundles),output=str(workspace),
+                       tasks=tasks,model_api_calls=0,training_started=False,
+                       platform_protocol_verified=False),resume_plan
+
+
+def main():
+    p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--bundles',type=Path,required=True)
+    p.add_argument('--output',type=Path,required=True)
+    p.add_argument('--policy',choices=['rule','qwen'],required=True)
+    p.add_argument('--cpu-budget',type=int,required=True)
+    p.add_argument('--price-record',type=Path)
+    p.add_argument('--tokenizer',type=Path)
+    p.add_argument('--check',action='store_true',help='Validate all launch inputs without writes, training or model calls')
+    p.add_argument('--resume',action='store_true',help='Continue a verified pre-sampling failure in the same workspace')
+    a=p.parse_args()
+    try:
+        prices,checked,resume_plan=preflight(a)
+    except Exception as error:
+        message=str(error)
+        key=os.environ.get('PYTRIO_API_KEY')
+        if key:message=message.replace(key,'[REDACTED]')
+        print(json.dumps(dict(stage='preflight',error_type=type(error).__name__,message=message)),file=sys.stderr)
+        raise SystemExit(2)
+    if a.check:
+        print(json.dumps(checked));return
+    if sys.platform!='linux':raise RuntimeError('Use the native Linux host')
+    os.sched_setaffinity(0,set(sorted(os.sched_getaffinity(0))[:4]))
+    resource.setrlimit(resource.RLIMIT_AS,(8000000000,8000000000))
+    os.environ.pop('SWANLAB_API_KEY',None)
+    if a.policy=='qwen':os.environ['PYTRIO_TOKENIZER_PATH']=str(a.tokenizer.resolve())
+    workspace=a.output.resolve();output=workspace/'runs';results={};resume_tasks=set()
     if a.resume:
-        if a.policy!='qwen' or not output.is_dir() or (output/'summary.json').exists():raise ValueError('Expected an interrupted qwen run directory')
-        for task in 'ABC':
-            root=output/task
-            if not root.exists():continue
-            summary=json.loads((root/'controller-summary.json').read_text());state=_state(root)
-            if summary.get('runtime_format')!=FORMAT or state.get('runtime_format')!=FORMAT:raise ValueError('Resume accepts only runs created by this phase-runtime copy')
-            if summary['profile']!=task or summary['policy']!=a.policy or summary['cpu_budget']!=a.cpu_budget or len(state['events'])!=summary['experiments'] or state['selected_metrics']!=summary['final_metrics']:raise ValueError('Existing task does not match requested run')
-            if summary['complete']:
-                if len(state['events'])!=10 or not summary['final_review']:raise ValueError('Completed model task has missing experiments or review')
-                results[task]=summary
-            else:
-                resume_checkpoint(root,a.policy,a.cpu_budget);resume_tasks.add(task)
-        if not resume_tasks:raise ValueError('No interrupted pre-sampling task to continue')
-        if (output/'failure.json').exists():
-            archive=output/'previous-failures';archive.mkdir(exist_ok=True)
-            _write(archive/f'{len(list(archive.glob("*.json")))+1:02d}.json',json.loads((output/'failure.json').read_text()))
-    else:output.mkdir(parents=True,exist_ok=False)
+        results,resume_tasks=resume_plan
+        if (workspace/'failure.json').exists():
+            archive=workspace/'previous-failures';archive.mkdir(exist_ok=True)
+            _write(archive/f'{len(list(archive.glob("*.json")))+1:02d}.json',json.loads((workspace/'failure.json').read_text()))
+    else:
+        workspace.mkdir(exist_ok=False);output.mkdir()
     try:
         for task in 'ABC':
             if task not in results:results[task]=run_task(a.bundles/task,output/task,a.policy,a.cpu_budget,prices,resume=task in resume_tasks)
-        export_models(output,output.parent/(output.name+'-models'))
+        export_models(output,workspace/'models')
         from ..solution_tracking import prepare_tools
-        _write(output/'swanlab-metrics.json',prepare_tools(output));_write(output/'summary.json',dict(complete=True,policy=a.policy,explicit_continuation=a.resume,tasks=results,model_api_calls=sum(v['model_api_calls'] for v in results.values()),platform_evaluations=0));print('UNIFIED_RUN_COMPLETE',a.policy,flush=True)
+        _write(workspace/'swanlab-metrics.json',prepare_tools(output))
+        _write(workspace/'summary.json',dict(complete=True,policy=a.policy,explicit_continuation=a.resume,tasks=results,model_api_calls=sum(v['model_api_calls'] for v in results.values()),platform_evaluations=0))
+        print('UNIFIED_RUN_COMPLETE',a.policy,flush=True)
     except Exception as error:
         message=str(error);key=os.environ.get('PYTRIO_API_KEY')
         if key:message=message.replace(key,'[REDACTED]')
-        _write(output/'failure.json',dict(error_type=type(error).__name__,message=message));raise
+        _write(workspace/'failure.json',dict(error_type=type(error).__name__,message=message));raise
 
 
 if __name__=='__main__':main()

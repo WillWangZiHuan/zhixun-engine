@@ -7,12 +7,12 @@ from .program import compile_program,check_gradient
 
 def train(parent,data,source,context,output):
     output=Path(output);output.mkdir(exist_ok=False);started=time.monotonic();program=compile_program(source);model=load_checkpoint(parent,'core');task=model.meta['task'];check=check_gradient(program['loss'],task)
-    with np.load(data,allow_pickle=False) as d:x=d['x'].copy();y=d['y'].copy();groups=d['groups'].copy()
-    if groups.dtype.kind not in 'iu' or groups.shape!=y.shape or set(np.unique(groups))!=set(range(int(groups.max())+1)):raise ValueError('invalid training groups')
+    with np.load(data,allow_pickle=False) as d:x=d['x'].copy();y=d['y'].copy();groups=d['groups'].copy() if 'groups' in d.files else None
+    if groups is not None and (groups.dtype.kind not in 'iu' or groups.shape!=y.shape or set(np.unique(groups))!=set(range(int(groups.max())+1))):raise ValueError('invalid training groups')
     x=model.normalized(x)
     if task=='regression':y=(y-model.meta['target_mean'])/model.meta['target_scale']
     elif y.dtype.kind not in 'iu' or np.any(y<0) or np.any(y>=len(model.meta['classes'])):raise ValueError('invalid class labels')
-    for a in (x,y,groups):a.setflags(write=False)
+    for a in (x,y) + (() if groups is None else (groups,)):a.setflags(write=False)
     plan=program['plan'](dict(context))
     if not isinstance(plan,dict) or set(plan)!={'epochs','batch_size'}:raise ValueError('plan fields must be epochs,batch_size')
     epochs,batch=plan['epochs'],plan['batch_size']

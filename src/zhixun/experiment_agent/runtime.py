@@ -8,8 +8,7 @@ from .program import validate
 
 def supervise(case, worker_module):
     """Run the trusted updater on this Linux host without service credentials."""
-    if sys.platform != 'linux':
-        raise RuntimeError('Training-code execution requires a native Linux host')
+    if sys.platform not in ('linux','darwin'):raise RuntimeError('Native Linux or macOS sandbox required')
     runtime = Path(inspect.getfile(Model)).resolve().parents[1]
     env = dict(PATH=os.pathsep.join([str(Path(sys.executable).parent), '/usr/bin', '/bin']),
                LANG='C.UTF-8', PYTHONPATH=os.pathsep.join([str(Path(__file__).resolve().parents[2]), str(runtime)]),
@@ -19,7 +18,12 @@ def supervise(case, worker_module):
     usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
     timed_out = False
     with (case/'stdout.log').open('w') as out, (case/'stderr.log').open('w') as err:
-        process = subprocess.Popen([sys.executable, '-m', worker_module, str(case)],
+        command=[sys.executable,'-B','-m',worker_module,str(case)]
+        if sys.platform=='darwin':
+            # Sandbox restricts generated numerical code to this case, with no network.
+            policy='(version 1)(allow default)(deny network*)(deny file-write*)(allow file-write* (subpath '+json.dumps(str(case.resolve()),ensure_ascii=False)+'))'
+            command=['/usr/bin/sandbox-exec','-p',policy,*command]
+        process = subprocess.Popen(command,
                                    env=env, stdout=out, stderr=err, start_new_session=True)
         try:
             code = process.wait(timeout=40)
@@ -31,12 +35,14 @@ def supervise(case, worker_module):
     report = dict(exit_code=code, timed_out=timed_out,
                   cpu_seconds=(usage_after.ru_utime+usage_after.ru_stime)-(usage_before.ru_utime+usage_before.ru_stime),
                   wall_seconds=time.monotonic()-started, credentials_forwarded=False,
-                  execution='native Linux child process', network_isolated=False)
+                  execution='macOS sandbox child' if sys.platform=='darwin' else 'native Linux child process', network_isolated=sys.platform=='darwin', aggregate_memory_enforced=False)
     (case/'supervisor.json').write_text(json.dumps(report, indent=2)+'\n')
     return report
 
 def evaluate(model,data,names):
- pred=model.predict(data['x']);error=pred-data['y'];groups={str(g):dict(n=int(sum(names==g)),rmse=float(np.sqrt(np.mean(error[names==g]**2))),mae=float(np.mean(abs(error[names==g]))),bias=float(np.mean(error[names==g]))) for g in sorted(set(names))}
+ pred=model.predict(data['x']);error=pred-data['y']
+ if names is None:return dict(rmse=float(np.sqrt(np.mean(error**2))),mae=float(np.mean(abs(error))),device_groups_available=False)
+ groups={str(g):dict(n=int(sum(names==g)),rmse=float(np.sqrt(np.mean(error[names==g]**2))),mae=float(np.mean(abs(error[names==g]))),bias=float(np.mean(error[names==g]))) for g in sorted(set(names))}
  return dict(rmse=float(np.sqrt(np.mean(error**2))),mae=float(np.mean(abs(error))),groups=groups,worst_group_rmse=max(v['rmse'] for v in groups.values()))
 
 def execute(case,parent,data,source,context,cpu_remaining):

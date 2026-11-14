@@ -74,7 +74,18 @@ def train(case):
             if kind=='core':model=ResidualBoost(model,leaves=15,min_leaf=30,rate=rate);kind='residual_boost'
             else:model.rate=rate
             with np.load(case/'train.npz',allow_pickle=False) as data:
-                counts=np.bincount(data['groups']);weights=len(data['y'])/(len(counts)*counts[data['groups']])
+                if 'groups' in data.files:
+                    counts=np.bincount(data['groups']);weights=len(data['y'])/(len(counts)*counts[data['groups']])
+                else:
+                    # No fabricated device groups: the explicit Qwen numerical program
+                    # owns sample weighting for both core and residual continuation.
+                    from .program import compile_program
+                    weights=np.asarray(compile_program(proposal['program'])['sample_weights'](
+                        model.base.normalized(data['x']),
+                        (data['y']-model.meta['target_mean'])/model.meta['target_scale'],
+                        None,dict(job['context'])),dtype=float)
+                    if weights.shape!=data['y'].shape or not np.isfinite(weights).all() or np.any(weights<0) or weights.sum()<=0:raise ValueError('Invalid explicit residual weights')
+                    weights=weights/weights.mean()
                 target=(data['y']-model.base.predict(data['x']))/model.meta['target_scale']
                 retained=np.zeros(len(target)) if model.booster is None else model.booster.predict(model.base.normalized(data['x']),num_threads=1)
                 # Existing fit uses target + init_model: LightGBM subtracts retained forest
@@ -118,8 +129,11 @@ def train(case):
         raise
 
 def main():
-    case=Path(sys.argv[1]);job=json.loads((case/'job.json').read_text());allowed=sorted(os.sched_getaffinity(0))[:4];os.sched_setaffinity(0,set(allowed))
-    seconds=int(job['cpu_seconds']);resource.setrlimit(resource.RLIMIT_CPU,(seconds,seconds+1));resource.setrlimit(resource.RLIMIT_AS,(8000000000,8000000000));resource.setrlimit(resource.RLIMIT_FSIZE,(100000000,100000000));started=time.monotonic()
+    case=Path(sys.argv[1]);job=json.loads((case/'job.json').read_text());allowed=sorted(os.sched_getaffinity(0))[:4] if hasattr(os,'sched_getaffinity') else None
+    if allowed is not None:os.sched_setaffinity(0,set(allowed))
+    seconds=int(job['cpu_seconds']);resource.setrlimit(resource.RLIMIT_CPU,(seconds,seconds+1));
+    if sys.platform=='linux':resource.setrlimit(resource.RLIMIT_AS,(8000000000,8000000000))
+    resource.setrlimit(resource.RLIMIT_FSIZE,(100000000,100000000));started=time.monotonic()
     try:report=train(case);status='completed';error=None
     except Exception as e:status='failed';error=dict(type=type(e).__name__,message=str(e)[:1000]);report=None
     usage=resource.getrusage(resource.RUSAGE_SELF)

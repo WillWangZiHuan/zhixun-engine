@@ -40,7 +40,9 @@ def _metrics(model, data, names):
 
 
 def _cached(root, split):
-    with np.load(root/'data'/f'{split}.npz',allow_pickle=False) as d:return {k:d[k].copy() for k in d.files}
+    with np.load(root/'data'/f'{split}.npz',allow_pickle=False) as d:values={k:d[k].copy() for k in d.files}
+    values.setdefault('names',None)
+    return values
 
 
 def _state(root):
@@ -49,10 +51,15 @@ def _state(root):
     return state
 
 
-def prepare(bundle, output, cpu_budget):
-    if type(cpu_budget) is not int or not 1<=cpu_budget<=600:raise ValueError('Specify an integer development CPU budget in 1..600 seconds')
-    started=time.process_time();bundle,output=Path(bundle).resolve(),Path(output).resolve()
-    if output==bundle or bundle in output.parents:raise ValueError('Output must be outside source data')
+def inspect_bundle(bundle):
+    """Validate the existing training-bundle format without writing or training."""
+    bundle=Path(bundle).resolve()
+    required=('checkpoint.npz','baseline-info.json','training.json','history.jsonl','public/train.jsonl','public/validation.jsonl')
+    for name in required:
+        if not (bundle/name).is_file():raise ValueError(f'Missing bundle file: {bundle/name}')
+    if not isinstance(json.loads((bundle/'training.json').read_text()),dict):raise ValueError('Training report must be a JSON object')
+    for line in (bundle/'history.jsonl').read_text().splitlines():
+        if line.strip() and not isinstance(json.loads(line),dict):raise ValueError('History records must be JSON objects')
     model=load_checkpoint(bundle/'checkpoint.npz');profile=model.meta['profile'];task=model.meta['task']
     if profile not in ('A','B','C') or task!=('classification' if profile=='A' else 'regression'):raise ValueError('Task/profile mismatch')
     if json.loads((bundle/'baseline-info.json').read_text())['dataset_key']!=profile:raise ValueError('Wrong bundle metadata')
@@ -61,15 +68,34 @@ def prepare(bundle, output, cpu_budget):
     if profile=='A':
         groups=train['y'];names=model.meta['classes'];train_names=np.array([names[y] for y in train['y']]);valid_names=np.array([names[y] for y in valid['y']])
     else:
-        key='bearing' if profile=='B' else 'source_subset';names=sorted({r['meta'][key] for r in rows});train_names=np.array([r['meta'][key] for r in rows]);valid_names=np.array([r['meta'][key] for r in vrows]);groups=np.array([names.index(n) for n in train_names])
-        device=lambda r:r['meta']['bearing'] if profile=='B' else (r['meta']['source_subset'],r['meta']['unit'])
-        if {device(r) for r in rows}&{device(r) for r in vrows}:raise ValueError('Train/validation devices overlap')
+        # Device IDs are optional provenance, never required training inputs.
+        groups=None;names=[];train_names=None;valid_names=None
+    return dict(model=model,profile=profile,task=task,train=train,valid=valid,
+                groups=groups,names=names,train_names=train_names,valid_names=valid_names,
+                train_rows=len(rows),validation_rows=len(vrows))
+
+
+def prepare(bundle, output, cpu_budget):
+    if type(cpu_budget) is not int or not 1<=cpu_budget<=600:raise ValueError('Specify an integer development CPU budget in 1..600 seconds')
+    started=time.process_time();bundle,output=Path(bundle).resolve(),Path(output).resolve()
+    if output==bundle or bundle in output.parents:raise ValueError('Output must be outside source data')
+    checked=inspect_bundle(bundle)
+    model,profile,task=(checked[k] for k in ('model','profile','task'))
+    train,valid,groups,names,train_names,valid_names=(checked[k] for k in ('train','valid','groups','names','train_names','valid_names'))
     source=default_program(task,{'A':32,'B':64,'C':256}[profile]);initial=_metrics(model,valid,valid_names)
     output.mkdir(parents=True,exist_ok=False);(output/'data').mkdir()
-    np.savez_compressed(output/'data/train.npz',x=train['x'],y=train['y'],groups=groups,names=train_names)
-    np.savez_compressed(output/'data/selection.npz',x=valid['x'],y=valid['y'],names=valid_names)
+    np.savez_compressed(output/'data/train.npz',x=train['x'],y=train['y'],**({} if groups is None else dict(groups=groups,names=train_names)))
+    np.savez_compressed(output/'data/selection.npz',x=valid['x'],y=valid['y'],**({} if valid_names is None else dict(names=valid_names)))
     save_checkpoint(model,output/'data/initial.npz');(output/'baseline_program.py').write_text(source)
-    state=dict(format='zhixun.task-tools.v2',profile=profile,task=task,selected='data/initial.npz',model_kind=checkpoint_kind(model),selected_trial=0,current_program=source,initial_metrics=initial,selected_metrics=initial,events=[],tool_cpu_seconds=time.process_time()-started,suggested_learning_rate={'A':.01,'B':.006,'C':.0005}[profile],max_attempts=10,max_tool_cpu_seconds=cpu_budget,group_names=names,train_rows=len(rows),selection_rows=len(vrows),data_scope='full official public training pack; reused public selection set; no independent test',model_api_calls=0,platform_evaluations=0)
+    state=dict(format='zhixun.task-tools.v2',profile=profile,task=task,selected='data/initial.npz',model_kind=checkpoint_kind(model),selected_trial=0,current_program=source,initial_metrics=initial,selected_metrics=initial,events=[],tool_cpu_seconds=time.process_time()-started,suggested_learning_rate={'A':.01,'B':.006,'C':.0005}[profile],max_attempts=10,max_tool_cpu_seconds=cpu_budget,group_names=names,device_metadata_used=False,device_split_verified=False,train_rows=checked['train_rows'],selection_rows=checked['validation_rows'],data_scope='supplied public training and selection only; device split not verified; no independent test',model_api_calls=0,platform_evaluations=0)
+    evidence=output/'input-evidence';evidence.mkdir()
+    hashes={}
+    for name in ('checkpoint.npz','baseline-info.json','training.json','history.jsonl','public/train.jsonl','public/validation.jsonl'):
+        hashes[name]=hashlib.sha256((bundle/name).read_bytes()).hexdigest()
+    for name in ('baseline-info.json','training.json','history.jsonl'):
+        shutil.copyfile(bundle/name,evidence/name)
+    _write(evidence/'source-hashes.json',hashes)
+    state['input_evidence']='input-evidence/source-hashes.json'
     _write(output/'state.json',state);return state
 
 
@@ -87,7 +113,7 @@ def observe(root):
         from ..boosted import ResidualBoost
         training_code+='\n'+inspect.getsource(ResidualBoost.fit);supplements.append('residual_trees')
     training_group_counts={name:int(sum(train['names']==name)) for name in state['group_names']}
-    result=dict(profile=state['profile'],task=state['task'],parent_kind=state['model_kind'],parent_trial=state['selected_trial'],context=dict(suggested_learning_rate=state['suggested_learning_rate'],current_learning_rate=model.meta['learning_rate'],parent_epochs=model.meta['epochs'],parent_steps=model.meta['steps'],remaining_experiments=state['max_attempts']-len(state['events'])),available_operations=operations,available_supplements=supplements,training_group_counts=training_group_counts,model_state=dict(core_epochs=model.meta['epochs'],core_steps=model.meta['steps'],tree_iterations=model.iterations if state['model_kind']=='residual_boost' else 0,steady_head_fitted=state['profile']=='A' and upstream_kind=='steady_pair' and upstream.coef is not None),target_mean=model.meta['target_mean'],target_scale=model.meta['target_scale'],group_names=state['group_names'],train_rows=state['train_rows'],selection_rows=state['selection_rows'],current_metrics=state['selected_metrics'],current_training_metrics=_metrics(model,train,train['names']),history=state['events'],baseline_program=(root/'baseline_program.py').read_text(),current_program=state['current_program'],model_training_code=training_code,loss_contract='Raw class logits and integer labels; derivative with respect to logits' if state['task']=='classification' else 'Normalized scalar predictions/targets; derivative with respect to normalized predictions',data_scope=state['data_scope'])
+    result=dict(profile=state['profile'],task=state['task'],parent_kind=state['model_kind'],parent_trial=state['selected_trial'],context=dict(suggested_learning_rate=state['suggested_learning_rate'],current_learning_rate=model.meta['learning_rate'],parent_epochs=model.meta['epochs'],parent_steps=model.meta['steps'],remaining_experiments=state['max_attempts']-len(state['events']),groups_available=state['task']=='classification'),available_operations=operations,available_supplements=supplements,training_group_counts=training_group_counts,model_state=dict(core_epochs=model.meta['epochs'],core_steps=model.meta['steps'],tree_iterations=model.iterations if state['model_kind']=='residual_boost' else 0,steady_head_fitted=state['profile']=='A' and upstream_kind=='steady_pair' and upstream.coef is not None),target_mean=model.meta['target_mean'],target_scale=model.meta['target_scale'],group_names=state['group_names'],train_rows=state['train_rows'],selection_rows=state['selection_rows'],current_metrics=state['selected_metrics'],current_training_metrics=_metrics(model,train,train['names']),history=state['events'],baseline_program=(root/'baseline_program.py').read_text(),current_program=state['current_program'],model_training_code=training_code,loss_contract='Raw class logits and integer labels; derivative with respect to logits' if state['task']=='classification' else 'Normalized scalar predictions/targets; derivative with respect to normalized predictions',data_scope=state['data_scope'])
     if state['profile']=='A':
         result['readout']=dict(names=['raw','x','hidden','logits','base_prob','classes'],
             class_order=model.meta['classes'],upstream_kind=upstream_kind,

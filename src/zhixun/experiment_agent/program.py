@@ -113,12 +113,12 @@ def check_gradient(fn, task="regression"):
 
 
 def default_program(task, batch_size):
-    """Official cross entropy or existing group-balanced regression update."""
+    """Official cross entropy or explicit row-weighted regression reference."""
     if task not in ('classification','regression'):raise ValueError('unsupported task')
     if type(batch_size) is not int or not 16 <= batch_size <= 4096:raise ValueError('invalid batch size')
     source=DEFAULT.replace('"batch_size": 64', '"batch_size": '+str(batch_size))
+    source=source.replace('    counts = np.bincount(groups)\n    return len(y) / (len(counts) * counts[groups])','    return np.ones_like(y)')
     if task=='classification':
-        source=source.replace('    counts = np.bincount(groups)\n    return len(y) / (len(counts) * counts[groups])','    return np.ones_like(y)')
         source=source[:source.index('def loss(')]+"""def loss(pred, target, weights):
     shifted = pred - np.max(pred, axis=1, keepdims=True)
     exponent = np.exp(shifted)

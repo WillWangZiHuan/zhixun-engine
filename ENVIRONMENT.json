@@ -1,59 +1,30 @@
 {
-  "purpose": "Observed existing environment; not a new installation lock or environment rebuild recipe",
-  "python": "3.12.16 (main, Nov  5 2026, 07:58:44) [GCC 12.2.0]",
-  "core_dependencies": {
+  "image_dependencies": {
     "numpy": "1.26.4",
-    "scipy": "1.15.3",
+    "pytrio": "0.2.9",
+    "transformers": "5.22.2",
     "scikit-learn": "1.9.1",
     "lightgbm": "4.7.0"
   },
-  "optional_existing_dependencies": {
-    "pytrio": "0.2.9",
-    "transformers": "5.22.2",
-    "swanlab": "0.10.4"
-  },
-  "version_sources": {
-    "linux_environment": {
-      "path": "verification/native-checkpoint-linux-root-review-v1/extracted/evidence/environment.json",
-      "sha256": "64c921a8994f22d74908e94c15f5214662d4f44390591a4e8798b78702a7ae26"
+  "local_verification": {
+    "scope": "Actual local verification environment; not a Docker environment or a portable lockfile",
+    "python": "3.13.5 | packaged by Anaconda, Inc. | (main, Jun 12 2025, 11:23:37) [Clang 14.0.6 ]",
+    "platform": "macOS-15.5-arm64-arm-64bit-Mach-O",
+    "dependencies": {
+      "numpy": "2.5.4",
+      "scipy": "1.18.1",
+      "scikit-learn": "1.9.1",
+      "lightgbm": "4.7.0",
+      "pytrio": "0.2.9",
+      "transformers": "5.22.2",
+      "tokenizers": "0.23.3"
     },
-    "image_package_metadata": {
-      "scikit-learn": {
-        "path": "image/solution-v5-candidate-v1/rootfs/opt/venv/lib/python3.12/site-packages/scikit_learn-1.9.1.dist-info/METADATA",
-        "sha256": "32e503c710a61e4e04be4edb450f9f8141233ac6af3f3db59a877667538fa4ec"
-      },
-      "transformers": {
-        "path": "image/solution-v5-candidate-v1/rootfs/opt/venv/lib/python3.12/site-packages/transformers-5.22.2.dist-info/METADATA",
-        "sha256": "6adeb6ebffd05a916183bfb054630b9e435b1e4c582ec4dcf17df3aaf236eead"
-      },
-      "numpy": {
-        "path": "image/solution-v5-candidate-v1/rootfs/opt/venv/lib/python3.12/site-packages/numpy-1.26.4.dist-info/METADATA",
-        "sha256": "b09734a7fed44e84b4c8161934ce532dff1e779ec6822d415644d117f6381070"
-      },
-      "pytrio": {
-        "path": "image/solution-v5-candidate-v1/rootfs/opt/venv/lib/python3.12/site-packages/pytrio-0.2.9.dist-info/METADATA",
-        "sha256": "7ed491f4e636135c019f12306a66cb508e2031992534de38a416164bf2d3d019"
-      },
-      "lightgbm": {
-        "path": "image/solution-v5-candidate-v1/rootfs/opt/venv/lib/python3.12/site-packages/lightgbm-4.7.0.dist-info/METADATA",
-        "sha256": "5d4c523f458fa8998bff7dfccc81d5a163bac9c626281c2816c8bc446681a0c9"
-      },
-      "swanlab": {
-        "path": "image/solution-v5-candidate-v1/rootfs/opt/venv/lib/python3.12/site-packages/swanlab-0.10.4.dist-info/METADATA",
-        "sha256": "9280229733eb1b0009cfee46fb93483009e9c379bcac12b0a1c2dc20f0b7bac7"
-      },
-      "scipy": {
-        "path": "image/solution-v5-candidate-v1/rootfs/opt/venv/lib/python3.12/site-packages/scipy-1.15.3.dist-info/METADATA",
-        "sha256": "c75caf32b67a13a9fc16aacf993a8bb883b7a69744ffe77cbbd4f3bfbad28f3d"
-      }
-    },
-    "historical_dependency_report": {
-      "path": "image/solution-v5-candidate-v1/rootfs/opt/zhixun/evidence/environment-verification.json",
-      "sha256": "5d561f19994562ce338f0d837de08ee8831bc05fee5f3f30b892ba281780a839",
-      "python_note": "Historical report Python is not current rootfs Python; use the Linux environment record above."
-    }
+    "no_dependency_installs": true,
+    "credentials_included": false,
+    "tokenizer_included": false,
+    "models_included": false,
+    "historical_egg_info_excluded": true
   },
-  "source_egg_info_is_historical_not_install_contract": true,
-  "no_dependencies_installed": true,
-  "tokenizer": "Not included. Existing accepted Linux environment has /opt/zhixun/assets/tokenizer; required only for authorized qwen policy."
+  "image_python": "3.12.16",
+  "docker_lifecycle_verified": false
 }
