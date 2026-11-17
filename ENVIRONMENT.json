@@ -15,5 +15,8 @@
     "lightgbm": "4.7.0"
   },
   "dependency_installs_this_task": 0,
-  "live_workspace_io_delivery_verified": false
+  "contest_harness": "1.0.2",
+  "image_python": "3.12",
+  "linux_execution_verified": false,
+  "live_gateway_verified": false
 }

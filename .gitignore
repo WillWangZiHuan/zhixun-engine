@@ -1,8 +1,6 @@
 __pycache__/
-*.py[cod]
-.venv/
-.env*
-.local/
+*.pyc
+.env
+*.npz
 *.tar
 *.tar.gz
-outputs/

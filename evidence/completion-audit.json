@@ -1,0 +1,36 @@
+{
+  "local_acceptance": true,
+  "official_sdk_tests": 15,
+  "continuous_rounds": 30,
+  "continuous_prediction_responses": 259720,
+  "supplement_rounds": 4,
+  "supplement_prediction_responses": 48586,
+  "checked_failure_cases": 8,
+  "parent_retention_branches": 6,
+  "native_head_and_readout_preserved": true,
+  "residual_forest_append_verified": true,
+  "production_python312_syntax_checked": true,
+  "entrypoint_description": {
+    "protocol": "contest.harness.workspace.v2",
+    "model_access": "host_gateway_rpc",
+    "sdk": "contest_harness",
+    "sdk_version": "1.0.2",
+    "tasks": [
+      "classification",
+      "regression"
+    ]
+  },
+  "source_sha256": "58b9137594ec6b00b8c12ed4c9160291e174a3de0777ebc84ef8ebeeeffb6bde",
+  "image_sha256": "9d16878311c88261e7512207af9b25b55266881891275e3c60bc931446f13eaa",
+  "source_and_image_byte_match": true,
+  "source_files": 42,
+  "original_release_and_image_unchanged": true,
+  "linux_container_execution": false,
+  "real_model_gateway_verified": false,
+  "model_response_evidence": "Historical proposal text plus explicit offline selection and supplement fixtures",
+  "local_scope": "Official SDK with macOS path-mapped host; actual CPU training and incremental stdin prediction",
+  "platform_uploads": 0,
+  "platform_trials": 0,
+  "new_live_model_calls": 0,
+  "evidence_time": "Before user uploaded image on 2026-11-17; zero uploads refers only to that local task."
+}
