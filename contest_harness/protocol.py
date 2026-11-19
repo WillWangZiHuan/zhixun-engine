@@ -7,7 +7,7 @@ from .errors import HarnessError
 
 PROTOCOL = "contest.harness.workspace.v2"
 SDK_NAME = "contest_harness"
-SDK_VERSION = "1.0.2"
+SDK_VERSION = "1.0.4"
 MODEL_ACCESS = "host_gateway_rpc"
 
 

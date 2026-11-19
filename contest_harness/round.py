@@ -20,7 +20,8 @@ _MODEL_OPTIONS = frozenset((
 _TEXT_LIMIT = 4000
 _CONFIG_LIMIT = 65536
 _FILE_LIMIT = 64
-_BYTE_LIMIT = 64 * 1024 * 1024
+_BYTE_LIMIT = 512 * 1024 * 1024
+_CHUNK = 1024 * 1024
 
 
 def _text(value, limit=_TEXT_LIMIT):
@@ -103,7 +104,11 @@ class ParentView:
             raise HarnessError("PARENT_FILE_NOT_DECLARED", relative)
         base = self.root if root is None else Path(root)
         path = _regular(base / relative, base)
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(_CHUNK), b""):
+                digest.update(chunk)
+        digest = digest.hexdigest()
         expected = item.get("sha256", "")
         if expected.startswith("sha256:"):
             expected = expected[7:]
@@ -137,6 +142,7 @@ class Round:
         self._writer = writer
         self._sequence = 0
         self._lock = threading.Lock()
+        self._outcome_unknown = False
         self._finished = False
 
     @classmethod
@@ -218,7 +224,7 @@ class Round:
             parent_checkpoint_sha256=self.parent.checkpoint_sha256,
             hypothesis=hypothesis, change_summary=change_summary,
             configuration=configuration, seed=seed, artifact=artifact,
-            files=_files(directory),
+            upload_id=self._upload(directory, "candidate"),
         )
         if not isinstance(reply.get("artifact_id"), str) or not reply["artifact_id"]:
             raise HarnessError("CANDIDATE_RECEIPT_INVALID")
@@ -227,12 +233,47 @@ class Round:
     def save_state(self, directory):
         if self._finished:
             raise HarnessError("ROUND_FINISHED")
-        reply = self._rpc("state_request", "state_response", parent_state_sha256=self._parent_state_sha256, files=_files(directory, allow_empty=True))
+        reply = self._rpc("state_request", "state_response", parent_state_sha256=self._parent_state_sha256, upload_id=self._upload(directory, "state", allow_empty=True))
         digest = reply.get("state_sha256")
         if not isinstance(digest, str):
             raise HarnessError("STATE_RECEIPT_INVALID")
         self.state_sha256 = digest
         return digest
+
+    def _upload(self, directory, kind, allow_empty=False):
+        root = Path(directory)
+        if self.limits.get("artifact_upload_protocol") != "chunked-v1":
+            raise HarnessError("CHUNKED_UPLOAD_UNSUPPORTED", "This SDK requires a host with streaming uploads")
+        max_bytes = min(self.limits.get("artifact_bytes" if kind == "candidate" else "state_bytes", _BYTE_LIMIT),
+                        self.limits.get(kind + "_upload_bytes_per_round", _BYTE_LIMIT))
+        chunk_bytes = min(_CHUNK, self.limits.get("upload_chunk_bytes", _CHUNK))
+        manifest = _files(root, allow_empty=allow_empty, max_bytes=max_bytes, chunk_bytes=chunk_bytes)
+        try:
+            reply = self._rpc("upload_begin_request", "upload_begin_response", kind=kind, files=manifest)
+        except HarnessError as exc:
+            if exc.code in ("RPC_MISMATCH", "HOST_STREAM_CLOSED"):
+                raise HarnessError("CHUNKED_UPLOAD_UNSUPPORTED", "This SDK requires a host with streaming uploads") from exc
+            raise
+        upload_id = reply.get("upload_id")
+        if not isinstance(upload_id, str) or not upload_id:
+            raise HarnessError("CHUNKED_UPLOAD_UNSUPPORTED", "This SDK requires a host with streaming uploads")
+        for item in manifest:
+            path = _regular(root / item["path"], root)
+            digest = hashlib.sha256()
+            offset = 0
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(chunk_bytes), b""):
+                    digest.update(chunk)
+                    reply = self._rpc("upload_chunk_request", "upload_chunk_response", upload_id=upload_id, path=item["path"], offset=offset, data_base64=base64.b64encode(chunk).decode())
+                    offset += len(chunk)
+                    if reply.get("offset") != offset:
+                        raise HarnessError("UPLOAD_OFFSET_MISMATCH", item["path"])
+            if offset != item["size_bytes"] or "sha256:" + digest.hexdigest() != item["sha256"]:
+                raise HarnessError("UPLOAD_DIGEST_MISMATCH", item["path"])
+        reply = self._rpc("upload_finish_request", "upload_finish_response", upload_id=upload_id)
+        if reply.get("upload_id") != upload_id:
+            raise HarnessError("UPLOAD_RECEIPT_INVALID")
+        return upload_id
 
     def state_workspace(self, directory):
         """Copy the read-only state mount into a new writable directory."""
@@ -293,7 +334,7 @@ class Round:
                     raise HarnessError("ARTIFACT_INVALID")
                 names.add(name)
                 total += size
-                if total > _BYTE_LIMIT:
+                if total > self.limits.get("artifact_bytes", _BYTE_LIMIT):
                     raise HarnessError("ARTIFACT_LIMIT")
                 target = root.joinpath(*name.split("/"))
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -344,6 +385,9 @@ class Round:
         if any(item not in self.history_ids for item in cited_history):
             raise HarnessError("HISTORY_UNKNOWN")
         with self._lock:
+            if self._outcome_unknown:
+                raise HarnessError("RPC_OUTCOME_UNKNOWN")
+            self._outcome_unknown = True
             emit({"type": "round_complete", "record": {
                 "selected_artifact_id": selected_artifact_id,
                 "hypothesis": hypothesis,
@@ -360,16 +404,20 @@ class Round:
             self._finished = True
         return ack
 
-    def _rpc(self, kind, expect, **fields):
+    def _rpc(self, request_type, expect, **fields):
         with self._lock:
             if self._finished:
                 raise HarnessError("ROUND_FINISHED")
+            if self._outcome_unknown:
+                raise HarnessError("RPC_OUTCOME_UNKNOWN")
+            self._outcome_unknown = True
             identifier = self._sequence
             self._sequence += 1
-            emit({"type": kind, "id": identifier, **fields}, self._writer)
+            emit({"type": request_type, "id": identifier, **fields}, self._writer)
             reply = read_frame(self._reader)
             if reply.get("id") != identifier or reply.get("type") != expect:
                 raise HarnessError("RPC_MISMATCH", expect)
+            self._outcome_unknown = False
             return reply
 
 
@@ -409,7 +457,7 @@ def _declaration(hypothesis, change_summary, configuration, seed):
         raise HarnessError("SEED_INVALID")
 
 
-def _files(directory, allow_empty=False):
+def _files(directory, allow_empty=False, max_bytes=_BYTE_LIMIT, chunk_bytes=_CHUNK):
     root = Path(directory)
     if root.is_symlink() or not root.is_dir():
         raise HarnessError("DIRECTORY_INVALID", str(root))
@@ -422,10 +470,15 @@ def _files(directory, allow_empty=False):
         relative = path.relative_to(root).as_posix()
         if not _safe_path(relative):
             raise HarnessError("PATH_UNSAFE", relative)
-        content = _regular(path, root).read_bytes()
-        total += len(content)
-        files.append({"path": relative, "data_base64": base64.b64encode(content).decode()})
-        if len(files) > _FILE_LIMIT or total > _BYTE_LIMIT:
+        digest = hashlib.sha256()
+        size = 0
+        with _regular(path, root).open("rb") as handle:
+            for chunk in iter(lambda: handle.read(chunk_bytes), b""):
+                size += len(chunk)
+                digest.update(chunk)
+        total += size
+        files.append({"path": relative, "size_bytes": size, "sha256": "sha256:" + digest.hexdigest()})
+        if len(files) > _FILE_LIMIT or total > max_bytes:
             raise HarnessError("ARTIFACT_LIMIT")
     if not files and not allow_empty:
         raise HarnessError("ARTIFACT_EMPTY")

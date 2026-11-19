@@ -1,10 +1,3 @@
-# The frozen third-version image must already be loaded locally under this tag.
-FROM zhixun-engine:workspace-qwen-amd64-v1
-USER root
-RUN rm -rf /opt/zhixun && mkdir -p /app /workspace && chown 10001:10001 /workspace && ln -s python /opt/venv/bin/python3
+FROM zhixun-engine:sdk-1.0.2-amd64-v1
 COPY --chown=0:0 . /app/
-ENV PYTHONPATH=/app:/app/src:/app/runtime PYTHONDONTWRITEBYTECODE=1
-WORKDIR /workspace
-USER 10001:10001
-ENTRYPOINT ["/opt/venv/bin/python", "/app/harness.py"]
-CMD ["describe"]
+LABEL org.opencontainers.image.version="sdk-1.0.4" zhixun.sdk-source.sha256="7afd282d6b5fd889d64d0515a67d169806970e36200689b18d2040026167a4af"

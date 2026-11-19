@@ -1,6 +1,0 @@
-__pycache__/
-*.pyc
-.env
-*.npz
-*.tar
-*.tar.gz
