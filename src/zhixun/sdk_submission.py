@@ -14,6 +14,7 @@ from .sdk_training import prepare, continue_candidate, write, digest
 from .round_prompt import PROMPT
 
 PREDICT_ARGV = ['python3', '/app/harness.py', 'predict']
+MAX_OUTPUT_TOKENS = 16_384
 SELECT_PROMPT = '''Choose between the supplied parent artifact and the new candidate using the
 actual platform candidate receipt, task contract, experiment and history. The host owns
 measurement; local diagnostics are not platform scores. Do not invent missing measurements,
@@ -36,8 +37,11 @@ def call_model(rnd, root, name, prompt, view):
     messages = [{'role':'system', 'content':prompt},
                 {'role':'user', 'content':json.dumps(view, ensure_ascii=False, allow_nan=False)}]
     write(folder/'messages.json', messages)
-    # SDK supplies the authorized output limit and the host prepends its prompt once.
-    receipt = rnd.model(messages, temperature=0)
+    max_tokens = min(rnd.max_output_tokens, MAX_OUTPUT_TOKENS)
+    print(json.dumps(dict(dataset=rnd.dataset_key, round_index=rnd.round_index, stage=name,
+                          host_max_output_tokens=rnd.max_output_tokens, max_tokens=max_tokens)),
+          file=sys.stderr, flush=True)
+    receipt = rnd.model(messages, temperature=0, max_tokens=max_tokens)
     write(folder/'receipt.json', dict(call_id=receipt.call_id, response=receipt.response))
     response = receipt.response
     choices = response.get('choices')
