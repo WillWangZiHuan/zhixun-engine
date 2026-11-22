@@ -1,3 +1,5 @@
-# 智训引擎 v4 升级候选 · SDK 1.0.4
-
-基于 11 月 17 日 v4 的 Linux/amd64 镜像和续训代码构建，使用官方 contest_harness 1.0.4。入口为 /app/harness.py describe、train、predict。候选与状态使用 chunked-v1，验证详情见 verification/sdk104-linux。
+# 智训引擎 · SDK 1.0.4 提交版
+本目录对应镜像的最终应用层。官方 SDK 通过 /app/harness.py 提供 describe、train、predict 三个入口。
+每轮使用宿主提供的父检查点、历史和公开数据，提案与选择均通过宿主模型网关，关闭思考，单次输出上限为 min(16384, 当轮授权值)。
+A 组的样本权重函数支持在六个固定类别上计算分类统计。候选在写全检查点、训练记录、提案和模型回执后检查总字节数。
+Dockerfile 依赖项目既有 Linux/amd64 基础镜像。基础镜像归档和赛事 SDK 的 SHA-256 见 PROVENANCE.json。

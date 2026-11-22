@@ -8,7 +8,7 @@ import sys
 from contest_harness.errors import HarnessError
 from baselines.data import json_value
 from baselines.predict import predict as model_predict
-from .checkpoint import load_checkpoint, core
+from .checkpoint import MAX_BYTES, load_checkpoint, core
 from .experiment_agent.unified_protocol import parse
 from .sdk_training import prepare, continue_candidate, write, digest
 from .round_prompt import A_PROMPT, PROMPT
@@ -121,6 +121,8 @@ def train(rnd):
         write(candidate/'model-receipt.json', dict(call_id=proposal_receipt.call_id,
                                                   response=proposal_receipt.response))
         stage = 'candidate_submit'
+        if sum(path.stat().st_size for path in candidate.rglob('*') if path.is_file()) > MAX_BYTES:
+            raise ValueError('Complete candidate exceeds 64 MiB')
         submitted = rnd.submit_candidate(candidate, hypothesis=proposal['hypothesis'],
                     change_summary=change, configuration=configuration, seed=seed,
                     checkpoint_paths=['checkpoint.npz'], code_paths=[], predict_argv=PREDICT_ARGV)

@@ -5,7 +5,7 @@ import json
 import shutil
 import numpy as np
 from baselines.data import read_dataset, json_value
-from .checkpoint import load_checkpoint, kind, core, MAX_BYTES
+from .checkpoint import load_checkpoint, kind, core
 from .experiment_agent.program import default_program
 from .experiment_agent.task_tools import _validate_proposal
 from .experiment_agent.unified_protocol import NUMERICAL_FUNCTIONS
@@ -95,6 +95,4 @@ def continue_candidate(root, prepared, proposal):
                   local_validation_after=metrics(candidate, valid), device_metadata_used=False,
                   device_split_verified=False, platform_score_claimed=False)
     write(target/'training.json', report)
-    if sum(p.stat().st_size for p in target.iterdir()) > MAX_BYTES:
-        raise ValueError('Candidate exceeds 64 MiB')
     return target, report
