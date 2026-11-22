@@ -11,7 +11,7 @@ from baselines.predict import predict as model_predict
 from .checkpoint import load_checkpoint, core
 from .experiment_agent.unified_protocol import parse
 from .sdk_training import prepare, continue_candidate, write, digest
-from .round_prompt import PROMPT
+from .round_prompt import A_PROMPT, PROMPT
 
 PREDICT_ARGV = ['python3', '/app/harness.py', 'predict']
 MAX_OUTPUT_TOKENS = 16_384
@@ -39,9 +39,10 @@ def call_model(rnd, root, name, prompt, view):
     write(folder/'messages.json', messages)
     max_tokens = min(rnd.max_output_tokens, MAX_OUTPUT_TOKENS)
     print(json.dumps(dict(dataset=rnd.dataset_key, round_index=rnd.round_index, stage=name,
-                          host_max_output_tokens=rnd.max_output_tokens, max_tokens=max_tokens)),
+                          host_max_output_tokens=rnd.max_output_tokens, max_tokens=max_tokens,
+                          enable_thinking=False)),
           file=sys.stderr, flush=True)
-    receipt = rnd.model(messages, temperature=0, max_tokens=max_tokens)
+    receipt = rnd.model(messages, temperature=0, max_tokens=max_tokens, enable_thinking=False)
     write(folder/'receipt.json', dict(call_id=receipt.call_id, response=receipt.response))
     response = receipt.response
     choices = response.get('choices')
@@ -95,7 +96,8 @@ def train(rnd):
                     actual_platform_history=history, previous_native_state=previous,
                     required_next='experiment')
         stage = 'proposal_model'
-        proposal_receipt, text = call_model(rnd, root, 'proposal', PROMPT, view)
+        prompt = A_PROMPT if rnd.dataset_key == 'A' else PROMPT
+        proposal_receipt, text = call_model(rnd, root, 'proposal', prompt, view)
         stage = 'proposal_validation'
         action = parse(text)
         if action['tool'] != 'experiment':
