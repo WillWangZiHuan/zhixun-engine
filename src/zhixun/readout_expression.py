@@ -4,6 +4,25 @@ import operator
 import numpy as np
 
 FUNCTIONS={name:getattr(np,name) for name in ('abs','square','sqrt','log1p','exp','tanh','sin','cos','minimum','maximum','clip','where','mean','std','sum','max','min','argmax','concatenate','stack')}
+def numeric_array(value):
+    def elements(item):
+        if isinstance(item, (list, tuple)):
+            return sum(elements(part) for part in item)
+        return np.size(item)
+
+    if elements(value) > LIMIT:
+        raise ValueError(f'np.array permits at most {LIMIT} numeric elements')
+    return bounded(np.asarray(value))
+
+
+def index_vector(length):
+    if type(length) is not int or not 0 <= length <= LIMIT:
+        raise ValueError(f'np.arange requires one integer length from 0 through {LIMIT}')
+    return np.arange(length)
+
+
+FUNCTIONS.update(array=numeric_array, arange=index_vector)
+READOUT_FUNCTIONS = ', '.join('np.' + name for name in sorted(FUNCTIONS))
 BINARY={ast.Add:operator.add,ast.Sub:operator.sub,ast.Mult:operator.mul,ast.Div:operator.truediv,ast.Pow:operator.pow,ast.BitAnd:operator.and_,ast.BitOr:operator.or_}
 COMPARE={ast.Lt:operator.lt,ast.LtE:operator.le,ast.Gt:operator.gt,ast.GtE:operator.ge,ast.Eq:operator.eq,ast.NotEq:operator.ne}
 NAMES={'raw','x','hidden','logits','base_prob','classes'}
@@ -32,7 +51,7 @@ class Expression:
             if isinstance(n,ast.Constant) and (type(n.value) not in (int,float,bool,type(None)) or (n.value is not None and (not np.isfinite(n.value) or abs(n.value)>10000))):raise ValueError('numeric constant limit')
             if isinstance(n,ast.Attribute) and not (isinstance(n.value,ast.Name) and n.value.id=='np' and n.attr in FUNCTIONS):raise ValueError('attribute not allowed')
             if isinstance(n,ast.Call):
-                if not isinstance(n.func,ast.Attribute) or n.func.attr not in FUNCTIONS or not isinstance(n.func.value,ast.Name) or n.func.value.id!='np':raise ValueError('only listed NumPy functions allowed')
+                if not isinstance(n.func,ast.Attribute) or n.func.attr not in FUNCTIONS or not isinstance(n.func.value,ast.Name) or n.func.value.id!='np':raise ValueError(f'Readout call {ast.unparse(n.func)} is unsupported. Available readout functions: {READOUT_FUNCTIONS}. classes is the six-element class index vector.')
                 if any(k.arg not in ('axis','keepdims') for k in n.keywords):raise ValueError('unsupported call keyword')
     def __call__(self,env):
         def visit(n):
@@ -68,8 +87,8 @@ class Expression:
                     shape=np.broadcast_shapes(*(np.shape(v) for v in args))
                     if np.prod(shape)>LIMIT:raise ValueError('function broadcast size limit')
                 # No out/dtype/callback arguments; all other args are numerical.
-                allowed_counts={'abs':(1,),'square':(1,),'sqrt':(1,),'log1p':(1,),'exp':(1,),'tanh':(1,),'sin':(1,),'cos':(1,),'minimum':(2,),'maximum':(2,),'clip':(3,),'where':(3,),'mean':(1,),'std':(1,),'sum':(1,),'max':(1,),'min':(1,),'argmax':(1,),'concatenate':(1,),'stack':(1,)}
-                if len(args) not in allowed_counts[name]:raise ValueError('function argument count')
+                allowed_counts={'array':(1,),'arange':(1,),'abs':(1,),'square':(1,),'sqrt':(1,),'log1p':(1,),'exp':(1,),'tanh':(1,),'sin':(1,),'cos':(1,),'minimum':(2,),'maximum':(2,),'clip':(3,),'where':(3,),'mean':(1,),'std':(1,),'sum':(1,),'max':(1,),'min':(1,),'argmax':(1,),'concatenate':(1,),'stack':(1,)}
+                if len(args) not in allowed_counts[name]:raise ValueError(f'Readout np.{name} expects argument counts {allowed_counts[name]}; got {len(args)}')
                 with np.errstate(all='ignore'):return bounded(FUNCTIONS[name](*args,**kwargs))
             raise ValueError('unsupported expression')
         return visit(self.tree)
