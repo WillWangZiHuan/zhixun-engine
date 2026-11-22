@@ -17,6 +17,8 @@ def train(parent,data,source,context,output):
     if not isinstance(plan,dict) or set(plan)!={'epochs','batch_size'}:raise ValueError('plan fields must be epochs,batch_size')
     epochs,batch=plan['epochs'],plan['batch_size']
     if type(epochs) is not int or not 1<=epochs<=5 or type(batch) is not int or not 16<=batch<=4096:raise ValueError('training plan exceeds limits')
+    if epochs * math.ceil(len(x) / batch) > 1500:
+        raise ValueError('Plan exceeds 1500 updates for the current training set')
     weights=np.asarray(program['sample_weights'](x,y,groups,dict(context)),dtype=float)
     if weights.shape!=y.shape or not np.isfinite(weights).all() or np.any(weights<0) or weights.sum()<=0:raise ValueError('weights must be finite nonnegative and nonempty')
     weights=weights/weights.mean();weights.setflags(write=False);before_steps=model.meta['steps'];before_epochs=model.meta['epochs'];history=[];updates=0
@@ -26,7 +28,6 @@ def train(parent,data,source,context,output):
         if order.dtype.kind not in 'iu' or order.shape!=(len(x),) or not np.array_equal(np.sort(order),np.arange(len(x))):raise ValueError('batch order must be a permutation of training rows')
         total=0.;rates=[]
         for start in range(0,len(x),batch):
-            if updates>=1500:raise ValueError('experiment update limit exceeded')
             idx=order[start:start+batch];xb=x[idx];yb=y[idx];wb=weights[idx];hidden,logits=model.forward(xb);pred=logits[:,0] if task=='regression' else logits
             for a in (pred,yb,wb):a.setflags(write=False)
             loss,delta=program['loss'](pred,yb,wb);delta=np.asarray(delta,dtype=float)

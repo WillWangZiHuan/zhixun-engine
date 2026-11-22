@@ -12,6 +12,10 @@ from .experiment_agent.unified_protocol import NUMERICAL_FUNCTIONS
 from .experiment_agent.runtime import supervise
 
 
+class RejectedProposal(ValueError):
+    """Local validation rejected a model-authored experiment before upload."""
+
+
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
@@ -57,7 +61,10 @@ def prepare(parent, train_path, validation_path, profile, task):
 
 def continue_candidate(root, prepared, proposal):
     model, train, valid, inputs, hashes, view = prepared
-    _validate_proposal(proposal, model.meta['profile'])
+    try:
+        _validate_proposal(proposal, model.meta['profile'])
+    except (SyntaxError, ValueError, TypeError) as exc:
+        raise RejectedProposal(str(exc)) from exc
     case = root/'work'
     case.mkdir()
     shutil.copyfile(inputs['parent'], case/'parent.npz')
@@ -70,7 +77,13 @@ def continue_candidate(root, prepared, proposal):
                            (supervision['exit_code'], supervision['timed_out']))
     execution = json_value((case/'execution.json').read_text())
     if supervision['exit_code'] != 0 or execution['status'] != 'completed':
-        raise RuntimeError('CPU continuation failed: '+json.dumps(execution.get('error'), ensure_ascii=False))
+        error = execution.get('error') or {}
+        message = 'CPU continuation failed: '+json.dumps(error, ensure_ascii=False)
+        if execution.get('status') == 'failed' and error.get('type') in (
+                'SyntaxError', 'TypeError', 'ValueError', 'IndexError', 'KeyError',
+                'NameError', 'FloatingPointError', 'ZeroDivisionError', 'OverflowError'):
+            raise RejectedProposal(message)
+        raise RuntimeError(message)
     source = case/'result/checkpoint.npz'
     candidate = load_checkpoint(source)
     before, after = core(model), core(candidate)

@@ -2,6 +2,7 @@
 from pathlib import Path
 from functools import lru_cache
 import json
+import math
 import os
 import re
 import sys
@@ -10,7 +11,7 @@ from baselines.data import json_value
 from baselines.predict import predict as model_predict
 from .checkpoint import MAX_BYTES, load_checkpoint, core
 from .experiment_agent.unified_protocol import parse
-from .sdk_training import prepare, continue_candidate, write, digest
+from .sdk_training import RejectedProposal, prepare, continue_candidate, write
 from .round_prompt import A_PROMPT, PROMPT
 
 PREDICT_ARGV = ['python3', '/app/harness.py', 'predict']
@@ -44,16 +45,34 @@ def call_model(rnd, root, name, prompt, view):
           file=sys.stderr, flush=True)
     receipt = rnd.model(messages, temperature=0, max_tokens=max_tokens, enable_thinking=False)
     write(folder/'receipt.json', dict(call_id=receipt.call_id, response=receipt.response))
-    response = receipt.response
-    choices = response.get('choices')
-    if not isinstance(choices, list) or len(choices) != 1:
-        raise ValueError('Expected one model choice')
-    if choices[0].get('finish_reason') == 'length':
-        raise ValueError('Model reply truncated by output limit')
-    text = receipt.text
-    if not text.strip() or len(text.encode('utf-8')) > 131072:
-        raise ValueError('Expected bounded nonempty decision text')
-    return receipt, text
+    return receipt
+
+
+def decision(rnd, root, name, prompt, view, evaluate):
+    """A confirmed unusable reply can be revised before any host-side commit."""
+    feedback = None
+    for attempt in range(1, 4):
+        label = name if attempt == 1 else f'{name}-{attempt}'
+        request = view if feedback is None else {**view, 'revision_request': feedback}
+        receipt = call_model(rnd, root, label, prompt, request)
+        folder = root/label
+        text = receipt.text
+        try:
+            choices = receipt.response.get('choices')
+            if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
+                raise RejectedProposal('Return one decision in the assistant message.')
+            if choices[0].get('finish_reason') == 'length':
+                raise RejectedProposal('Output was truncated. Return a shorter complete decision.')
+            if not text.strip() or len(text.encode('utf-8')) > 131072:
+                raise RejectedProposal('Return a bounded nonempty decision.')
+            return receipt, evaluate(folder, text)
+        except RejectedProposal as error:
+            feedback = dict(rejected_call_id=receipt.call_id, error=safe_error(error),
+                            previous_reply=text[:16000],
+                            instruction='Correct the reported error and return one complete new decision.')
+            write(folder/'rejection.json', feedback)
+            if attempt == 3:
+                raise
 
 
 def selection(text, allowed):
@@ -97,17 +116,23 @@ def train(rnd):
                     required_next='experiment')
         stage = 'proposal_model'
         prompt = A_PROMPT if rnd.dataset_key == 'A' else PROMPT
-        proposal_receipt, text = call_model(rnd, root, 'proposal', prompt, view)
-        stage = 'proposal_validation'
-        action = parse(text)
-        if action['tool'] != 'experiment':
-            raise ValueError('Training requires one experiment proposal')
+        def experiment(folder, text):
+            try:
+                action = parse(text)
+                if action['tool'] != 'experiment':
+                    raise ValueError('Training requires one experiment proposal')
+                hypothesis = action['proposal'].get('hypothesis')
+                if not isinstance(hypothesis, str) or not 0 < len(hypothesis.encode('utf-8')) <= 4000:
+                    raise ValueError('Expected a nonempty hypothesis of at most 4000 UTF-8 bytes')
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise RejectedProposal(str(exc)) from exc
+            write(folder/'action.json', action)
+            candidate, report = continue_candidate(folder, prepared, action['proposal'])
+            return action, candidate, report
+
+        proposal_receipt, (action, candidate, report) = decision(
+            rnd, root, 'proposal', prompt, view, experiment)
         proposal = action['proposal']
-        if len(proposal['hypothesis'].encode('utf-8')) > 4000:
-            raise ValueError('Hypothesis exceeds SDK limit')
-        write(root/'proposal/action.json', action)
-        stage = 'continuation'
-        candidate, report = continue_candidate(root, prepared, proposal)
         change = ('Continued supplied parent from %d to %d Adam steps; full model kind=%s; '
                   'program sha256=%s; no device metadata used.' %
                   (core(model).meta['steps'], report['core_steps_after'], report['model_kind'], report['program_sha256']))
@@ -135,10 +160,15 @@ def train(rnd):
                            local_diagnostics={'scope':'not platform measurements',
                                'before':report['local_validation_before'],
                                'after':report['local_validation_after']})
-        choice_receipt, text = call_model(rnd, root, 'selection', SELECT_PROMPT, select_view)
-        stage = 'selection_validation'
-        chosen = selection(text, allowed)
-        write(root/'selection/action.json', chosen)
+        def choose(folder, text):
+            try:
+                chosen = selection(text, allowed)
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise RejectedProposal(str(exc)) from exc
+            write(folder/'action.json', chosen)
+            return chosen
+
+        choice_receipt, chosen = decision(rnd, root, 'selection', SELECT_PROMPT, select_view, choose)
         stage = 'state_save'
         write(state/'last-round.json', dict(dataset_key=rnd.dataset_key, round_index=rnd.round_index,
               supplied_parent_artifact_id=rnd.parent.artifact_id, candidate_receipt=submitted,
@@ -153,10 +183,12 @@ def train(rnd):
         # No protocol frames after round_ack.
     except Exception as error:
         detail = dict(stage=stage, error=safe_error(error), model_call_ids=list(rnd.call_ids),
-                      automatic_retry=False, fixed_rule_fallback=False)
+                      rpc_replayed=False)
         print(json.dumps(detail, ensure_ascii=False), file=sys.stderr, flush=True)
         if root is not None and root.is_dir():
             write(root/'failure.json', detail)
+        if isinstance(error, HarnessError):
+            raise
         raise HarnessError('ZHIXUN_'+stage.upper(), detail['error']) from None
 
 
@@ -181,4 +213,13 @@ def predict(sample, model_dir):
     model = prediction_model(str(path.resolve()))
     if model.meta['task'] != sample.task or (sample.dataset_key is not None and model.meta['profile'] != sample.dataset_key):
         raise HarnessError('PREDICTION_TASK_MISMATCH')
-    return model_predict(model, sample.inputs)
+    result = model_predict(model, sample.inputs)
+    if sample.task == 'classification':
+        scores = result['outputs']
+        best = max(row['score'] for row in scores)
+        tied = [row for row in scores if row['score'] == best]
+        # Match the trained classifier's argmax ordering on exact ties.
+        if len(tied) > 1 and best > 0:
+            for row in tied[1:]:
+                row['score'] = math.nextafter(best, 0.0)
+    return result
