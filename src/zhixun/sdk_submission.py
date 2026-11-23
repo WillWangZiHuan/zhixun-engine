@@ -12,7 +12,7 @@ from baselines.predict import predict as model_predict
 from .checkpoint import MAX_BYTES, load_checkpoint, core
 from .experiment_agent.unified_protocol import parse
 from .sdk_training import RejectedProposal, prepare, continue_candidate, write
-from .round_prompt import A_PROMPT, PROMPT
+from .round_prompt import TASK_PROPOSAL_PROMPTS, TASK_SELECTION_HINTS
 
 PREDICT_ARGV = ['python3', '/app/harness.py', 'predict']
 MAX_OUTPUT_TOKENS = 16_384
@@ -114,8 +114,37 @@ def train(rnd):
                     parent_artifact_id=rnd.parent.artifact_id, task_contract=rnd.task,
                     actual_platform_history=history, previous_native_state=previous,
                     required_next='experiment')
+        if rnd.dataset_key == 'B' and not history:
+            from .round_prompt import B_START_PROGRAM
+            view['baseline_program'] = B_START_PROGRAM
+            view['reference_experiment'] = {
+                'scope': 'Starting public experiment, not an already measured result on this run.',
+                'hypothesis': 'A short Huber continuation that doubles upper-quartile lifetime weights can reduce long-lifetime underprediction.',
+                'instruction': 'Test the supplied baseline_program as written from this starting checkpoint. Explain the upper-quartile weight contrast in reflection; a uniform-weight run is a different control.',
+            }
+        elif rnd.dataset_key == 'C' and not history:
+            view['reference_experiment'] = {
+                'program': view['baseline_program'],
+                'supplement': {'kind': 'residual_trees', 'trees': 12, 'learning_rate': 0.08},
+                'instruction': 'Establish the forest parent using the supplied program and supplement together, then compare both measured errors.',
+            }
+        elif rnd.dataset_key == 'C' and view['parent_kind'] == 'residual_boost':
+            view['reference_experiment'] = {
+                'program': view['baseline_program'],
+                'invariant': 'Keep sample_weights uniform, batch_order unchanged, and the fitted trees frozen. Omit supplement.',
+                'first_test': 'Use baseline_program as written for the first matched core-only experiment.',
+                'later_tests': 'Keep the numerical program simple. Choose one factor from the measured history: a different constant positive learning-rate multiplier, batch size, or Huber delta. Edit only that factor of the supplied reference program.',
+                'learning_rate_contract': 'step is the zero-based update index in this proposal. The last partial batch also counts. In this core-only experiment use a CONSTANT learning rate, e.g. return 0.5 * context["suggested_learning_rate"]. Never divide step by this epoch length or implement a decay schedule. Keep the returned rate in [1e-6, 0.1] throughout.',
+            }
         stage = 'proposal_model'
-        prompt = A_PROMPT if rnd.dataset_key == 'A' else PROMPT
+        prompt = TASK_PROPOSAL_PROMPTS[rnd.dataset_key]
+        if (isinstance(previous, dict)
+                and previous.get('supplied_parent_artifact_id') == rnd.parent.artifact_id
+                and previous.get('selected_artifact_id') == rnd.parent.artifact_id):
+            prompt += ("\nThe previous experiment was rejected on THIS parent. Read its exact program, "
+                       "supplement, readout and measurement in previous_native_state. Repeating the "
+                       "same executable settings on this seed will repeat the result. In reflection "
+                       "name that experiment and identify a materially different change; implement it.")
         def experiment(folder, text):
             try:
                 action = parse(text)
@@ -160,6 +189,19 @@ def train(rnd):
                            local_diagnostics={'scope':'not platform measurements',
                                'before':report['local_validation_before'],
                                'after':report['local_validation_after']})
+        if rnd.dataset_key == 'C':
+            before = report['local_validation_before']
+            after = report['local_validation_after']
+            tail = 'log_mean_exp_asymmetric_error'
+            select_view['retention_test'] = {
+                'scope': 'Matched local validation rows; lower is better for both metrics.',
+                'candidate_rmse_no_higher': after['rmse'] <= before['rmse'],
+                'candidate_NASA_penalty_no_higher': after[tail] <= before[tail],
+                'candidate_minus_parent_log_mean_penalty': after[tail] - before[tail],
+                'parent_id': allowed[0],
+                'candidate_id': allowed[1],
+                'decision_rule': 'Protect the gains already measured. Adopt only for a Pareto improvement: both tests must be true and at least one metric must improve. If either test is false, retain the parent. Compare the actual paired evidence and explain the choice.',
+            }
         def choose(folder, text):
             try:
                 chosen = selection(text, allowed)
@@ -168,7 +210,8 @@ def train(rnd):
             write(folder/'action.json', chosen)
             return chosen
 
-        choice_receipt, chosen = decision(rnd, root, 'selection', SELECT_PROMPT, select_view, choose)
+        selection_prompt = SELECT_PROMPT + '\n' + TASK_SELECTION_HINTS[rnd.dataset_key]
+        choice_receipt, chosen = decision(rnd, root, 'selection', selection_prompt, select_view, choose)
         stage = 'state_save'
         write(state/'last-round.json', dict(dataset_key=rnd.dataset_key, round_index=rnd.round_index,
               supplied_parent_artifact_id=rnd.parent.artifact_id, candidate_receipt=submitted,

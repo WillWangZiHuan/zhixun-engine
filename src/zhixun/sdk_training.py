@@ -29,7 +29,14 @@ def metrics(model, data):
         from .steady_cli import evaluate
         return evaluate(model, data)
     error = model.predict(data['x']) - data['y']
-    return dict(rmse=float(np.sqrt(np.mean(error**2))), mae=float(np.mean(abs(error))))
+    scores = dict(rmse=float(np.sqrt(np.mean(error**2))), mae=float(np.mean(abs(error))))
+    if model.meta['profile'] == 'C':
+        # log(1 + mean NASA penalty), in original cycles. Subtract the maximum
+        # before exponentiating so one large error cannot overflow this diagnostic.
+        exponent = np.where(error >= 0, error / 10.0, -error / 13.0)
+        peak = float(np.max(exponent))
+        scores['log_mean_exp_asymmetric_error'] = float(peak + np.log(np.mean(np.exp(exponent - peak))))
+    return scores
 
 
 def prepare(parent, train_path, validation_path, profile, task):
