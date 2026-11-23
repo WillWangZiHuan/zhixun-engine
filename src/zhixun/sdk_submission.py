@@ -17,7 +17,7 @@ from .round_prompt import TASK_PROPOSAL_PROMPTS, TASK_SELECTION_HINTS
 PREDICT_ARGV = ['python3', '/app/harness.py', 'predict']
 MAX_OUTPUT_TOKENS = 16_384
 SELECT_PROMPT = '''Choose between the supplied parent artifact and the new candidate using the
-actual platform candidate receipt, task contract, experiment and history. The host owns
+actual platform candidate receipt, task contract and this round's paired measurements. The host owns
 measurement; local diagnostics are not platform scores. Do not invent missing measurements,
 causality, hidden-test gains or call IDs. Return exactly one JSON object containing
 selected_artifact_id (one of allowed_artifact_ids) and reason (nonempty, <=4000 UTF-8 bytes).
@@ -36,7 +36,7 @@ def call_model(rnd, root, name, prompt, view):
     folder = root/name
     folder.mkdir()
     messages = [{'role':'system', 'content':prompt},
-                {'role':'user', 'content':json.dumps(view, ensure_ascii=False, allow_nan=False)}]
+                {'role':'user', 'content':json.dumps(view, ensure_ascii=False, allow_nan=False, separators=(',', ':'))}]
     write(folder/'messages.json', messages)
     max_tokens = min(rnd.max_output_tokens, MAX_OUTPUT_TOKENS)
     print(json.dumps(dict(dataset=rnd.dataset_key, round_index=rnd.round_index, stage=name,
@@ -87,6 +87,18 @@ def selection(text, allowed):
     return value
 
 
+def proposal_history(records):
+    """Keep decisions, interventions and scalar results. Full host records stay on disk."""
+    result = []
+    for record in records:
+        entry = {k: record[k] for k in ('id', 'round_index', 'stage_id', 'selected_artifact_id', 'hypothesis') if k in record}
+        metrics = record.get('validation_metrics')
+        if isinstance(metrics, dict):
+            entry['validation_metrics'] = {k: v for k, v in metrics.items() if isinstance(v, (float, int))}
+        result.append(entry)
+    return result
+
+
 def train(rnd):
     stage = 'input'
     root = None
@@ -112,7 +124,9 @@ def train(rnd):
         view.update(round_index=rnd.round_index, actual_parent_file_sha256=hashes['parent'],
                     parent_checkpoint_receipt=rnd.parent.checkpoint_sha256,
                     parent_artifact_id=rnd.parent.artifact_id, task_contract=rnd.task,
-                    actual_platform_history=history, previous_native_state=previous,
+                    actual_platform_history=proposal_history(history),
+                    previous_native_state={k: previous[k] for k in ('proposal', 'selected_artifact_id', 'reason') if k in previous}
+                    if isinstance(previous, dict) else None,
                     required_next='experiment')
         if rnd.dataset_key == 'B' and not history:
             from .round_prompt import B_START_PROGRAM
@@ -131,9 +145,9 @@ def train(rnd):
         elif rnd.dataset_key == 'C' and view['parent_kind'] == 'residual_boost':
             view['reference_experiment'] = {
                 'program': view['baseline_program'],
-                'invariant': 'Keep sample_weights uniform, batch_order unchanged, and the fitted trees frozen. Omit supplement.',
+                'invariant': 'Keep sample weights uniform, batch order unchanged and all trees frozen. The optional core_tail supplement updates only core output weights.',
                 'first_test': 'Use baseline_program as written for the first matched core-only experiment.',
-                'later_tests': 'Keep the numerical program simple. Choose one factor from the measured history: a different constant positive learning-rate multiplier, batch size, or Huber delta. Edit only that factor of the supplied reference program.',
+                'later_tests': 'After the baseline core-only continuation, test the asymmetric core_tail reference in the task instructions. Use paired RMSE and tail risk to choose.',
                 'learning_rate_contract': 'step is the zero-based update index in this proposal. The last partial batch also counts. In this core-only experiment use a CONSTANT learning rate, e.g. return 0.5 * context["suggested_learning_rate"]. Never divide step by this epoch length or implement a decay schedule. Keep the returned rate in [1e-6, 0.1] throughout.',
             }
         stage = 'proposal_model'
@@ -185,10 +199,16 @@ def train(rnd):
         allowed = [rnd.parent.artifact_id, submitted['artifact_id']]
         select_view = dict(allowed_artifact_ids=allowed, parent_artifact=rnd.parent.receipt,
                            candidate_receipt=submitted, task_contract=rnd.task,
-                           actual_platform_history=history, proposal=action,
+                           hypothesis=proposal['hypothesis'],
                            local_diagnostics={'scope':'not platform measurements',
                                'before':report['local_validation_before'],
                                'after':report['local_validation_after']})
+        if rnd.dataset_key == 'A':
+            select_view['same_round_macro_f1'] = {
+                'parent': report['local_validation_before']['macro_f1'],
+                'candidate': report['local_validation_after']['macro_f1'],
+                'scope': 'Both artifacts evaluated on exactly the current validation rows.',
+            }
         if rnd.dataset_key == 'C':
             before = report['local_validation_before']
             after = report['local_validation_after']

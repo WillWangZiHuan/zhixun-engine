@@ -26,7 +26,7 @@ def load_model(profile, checkpoint):
     expected_task='classification' if profile=='A' else 'regression'
     if model.meta.get('profile')!=profile or model.meta['task']!=expected_task:
         raise ValueError('Checkpoint task/profile mismatch')
-    if profile=='B' and kind(model)!='core':raise ValueError('B requires core')
+    if profile=='B' and kind(model) not in ('core','bearing_head'):raise ValueError('B requires a core or bearing head')
     return model
 
 

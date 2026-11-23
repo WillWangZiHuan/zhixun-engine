@@ -6,6 +6,7 @@ from pathlib import Path
 import zipfile
 import numpy as np
 from baselines.model import Model, PARAMETERS
+from .bearing_head import BearingHead
 
 FORMAT = 'zhixun.native-checkpoint.v1'
 MAX_BYTES = 64 * 1024 * 1024
@@ -16,7 +17,7 @@ def kind(model):
     from .steady_pair import SteadyPair
     from .readout import AReadout
     from .boosted import ResidualBoost
-    types = {Model:'core', SteadyPair:'steady_pair', AReadout:'a_readout', ResidualBoost:'residual_boost'}
+    types = {BearingHead:'bearing_head', Model:'core', SteadyPair:'steady_pair', AReadout:'a_readout', ResidualBoost:'residual_boost'}
     if type(model) not in types:raise ValueError('Unsupported checkpoint model type')
     return types[type(model)]
 
@@ -56,7 +57,7 @@ def _decode(arrays):
     info=_json(_text(arrays['native_metadata']))
     if not isinstance(info,dict) or info.get('format')!=FORMAT:raise ValueError('Unsupported native checkpoint format')
     model_kind=info.get('kind')
-    schemas={'core':{'format','kind'},'steady_pair':{'format','kind','head'},
+    schemas={'bearing_head':{'format','kind'},'core':{'format','kind'},'steady_pair':{'format','kind','head'},
              'a_readout':{'format','kind','readout'},'residual_boost':{'format','kind','forest'}}
     if model_kind not in schemas:raise ValueError('Unsupported native checkpoint kind')
     has_head=model_kind=='steady_pair'
@@ -74,6 +75,8 @@ def _decode(arrays):
         expected|={'head_pair','head_indices'}
         if head['fitted']:expected|={'head_mean','head_scale','head_coef','head_intercept'}
     if model_kind=='residual_boost':expected|={'forest_text'}
+    if model_kind == 'bearing_head':
+        expected |= {'bearing_' + name for name in ('amplitude','location','spread','centers','coefficients','bias')}
     if set(arrays)!=expected:raise ValueError('Unexpected checkpoint array keys')
     base=Model.__new__(Model)
     base.meta=_json(_text(arrays['metadata']))
@@ -87,6 +90,15 @@ def _decode(arrays):
         raise ValueError('Invalid core task/profile')
     if profile=='B' and base.meta.get('target_unit')!='minutes':raise ValueError('B requires minutes')
     model=base
+    if model_kind == 'bearing_head':
+        if profile != 'B':
+            raise ValueError('Vibration head requires B')
+        model = BearingHead(base)
+        n = len(base.meta['paths'])
+        for name, shape in [('amplitude',(n,)),('location',(n,)),('spread',(n,)),('centers',(3,n)),('coefficients',(3,n)),('bias',(3,))]:
+            setattr(model, name, _array(arrays, 'bearing_' + name, shape, 'float64'))
+        if np.any(model.amplitude <= 0) or np.any(model.spread <= 0):
+            raise ValueError('Invalid vibration feature scale')
     if has_head:
         if profile!='A':raise ValueError('Head requires A')
         model=SteadyPair(base)
@@ -138,6 +150,9 @@ def _encode(model):
         import lightgbm as lgb
         info['forest']=dict(leaves=model.leaves,min_leaf=model.min_leaf,rate=model.rate,iterations=model.iterations,library_version=lgb.__version__)
         arrays['forest_text']=np.array('' if model.booster is None else model.booster.model_to_string())
+    if model_kind == 'bearing_head':
+        for name in ('amplitude','location','spread','centers','coefficients','bias'):
+            arrays['bearing_' + name] = getattr(model, name)
     arrays['native_metadata']=np.array(json.dumps(info,sort_keys=True,separators=(',',':'),allow_nan=False))
     return arrays
 

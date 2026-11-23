@@ -32,6 +32,28 @@ class ResidualBoost:
         log={};before=self.iterations
         self.booster=lgb.train(params,data,num_boost_round=iterations,init_model=self.booster,valid_sets=[data],valid_names=['train'],callbacks=[lgb.record_evaluation(log)])
         return dict(tree_iterations_before=before,tree_iterations_after=self.iterations,train_residual_mse=log['train']['l2'],core_adam_steps_unchanged=self.base.meta['steps'])
+    def fit_core_tail(self, x, y):
+        """Adjust only the core output layer using training residuals in prediction bins."""
+        from scipy.special import logsumexp
+
+        predictions = self.predict(x)
+        errors = predictions - y
+        bins = np.digitize(predictions, np.unique(np.quantile(predictions, np.arange(1, 12) / 12)))
+        targets = np.empty(len(y))
+        temperature = 2.0
+        for i in np.unique(bins):
+            rows = bins == i
+            e = errors[rows]
+            balance = np.log(10 / 13) + logsumexp(-e / (13 * temperature)) - logsumexp(e / (10 * temperature))
+            targets[rows] = temperature * (130 / 23) * balance
+        hidden, _ = self.base.forward(self.base.normalized(x))
+        design = np.column_stack((hidden, np.ones(len(x))))
+        correction = np.linalg.solve(design.T @ design + 10 * np.eye(design.shape[1]), design.T @ targets)
+        correction *= .0625 / self.meta['target_scale']
+        self.base.params['w2'][:, 0] += correction[:-1]
+        self.base.params['b2'][0] += correction[-1]
+        self.base.validate()
+
     def save(self, path):
         from .checkpoint import save_checkpoint
         save_checkpoint(self, path)

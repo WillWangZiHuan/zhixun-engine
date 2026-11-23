@@ -131,7 +131,7 @@ def _validate_proposal(proposal, profile=None):
         if not isinstance(proposal[k],str) or not 1<=len(proposal[k].strip())<=3000:raise ValueError('Nonempty bounded experiment text required')
     if proposal['operation']!='core_code':raise ValueError('Every experiment requires core_code with an explicit program')
     required=shared|{'program'}
-    allowed=required|({'supplement','readout_expression'} if profile=='A' else {'supplement'} if profile=='C' else set())
+    allowed=required|({'supplement','readout_expression'} if profile=='A' else {'supplement'} if profile in ('B','C') else set())
     if not required<=set(proposal) or not set(proposal)<=allowed:raise ValueError('Unsupported joint proposal fields')
     validate(proposal['program'])
     if 'readout_expression' in proposal:
@@ -142,7 +142,11 @@ def _validate_proposal(proposal, profile=None):
         if not isinstance(supplement,dict):raise ValueError('supplement must be an explicit object')
         if profile=='A':
             if supplement!={'kind':'steady_head'}:raise ValueError('A supplement is exactly kind=steady_head')
+        elif profile=='B':
+            if supplement!={'kind':'bearing_head'}:raise ValueError('B supplement requires bearing_head')
         elif profile=='C':
+            if supplement == {'kind':'core_tail'}:
+                return
             if set(supplement)!={'kind','trees','learning_rate'} or supplement['kind']!='residual_trees':raise ValueError('C supplement requires kind,trees,learning_rate')
             if type(supplement['trees']) is not int or not 1<=supplement['trees']<=80:raise ValueError('Expected 1..80 residual trees')
             rate=supplement['learning_rate']

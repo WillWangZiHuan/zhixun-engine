@@ -68,6 +68,21 @@ def train(case):
             if kind=='a_readout':model.upstream=upstream;model.upstream_kind='steady_pair'
             else:model=upstream;kind='steady_pair'
             unchanged_core(updated,model.base);history.append(dict(kind='head_fit',**head));report['head']=head
+        elif supplement is not None and supplement['kind']=='bearing_head':
+            from ..bearing_head import BearingHead
+            if kind != 'core':
+                raise ValueError('The fitted bearing head is already present')
+            model = BearingHead(updated)
+            with np.load(case/'train.npz', allow_pickle=False) as data:
+                model.fit(data['x'], data['y'])
+            kind = 'bearing_head'
+            history.append(dict(kind='bearing_head', regimes=3))
+        elif supplement is not None and supplement['kind']=='core_tail':
+            if kind != 'residual_boost' or not model.iterations:
+                raise ValueError('Core tail calibration needs an inherited residual forest')
+            with np.load(case/'train.npz', allow_pickle=False) as data:
+                model.fit_core_tail(data['x'], data['y'])
+            history.append(dict(kind='core_output_calibration', train_only=True, trees_added=0))
         elif supplement is not None and supplement['kind']=='residual_trees':
             from ..boosted import ResidualBoost
             rate=supplement['learning_rate']
