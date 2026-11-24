@@ -1,6 +1,9 @@
 """Workspace-v2 protocol: propose, continue, measure, select, persist, acknowledge."""
 from pathlib import Path
 from functools import lru_cache
+import ast
+import hashlib
+import time
 import json
 import math
 import os
@@ -102,6 +105,19 @@ def selection(text, parent_id, candidate_id):
     return dict(selected_role=role, selected_artifact_id=parent_id if role == 'parent' else candidate_id, reason=reason)
 
 
+def experiment_key(proposal, mode, parent, training, validation, stage):
+    # Whitespace and comments do not turn an identical program into a new experiment.
+    source = proposal.get('program')
+    if not isinstance(source, str):
+        raise ValueError('proposal.program must be ONE JSON STRING with all five def statements and newline '
+                         'separators. A JSON map of function names is invalid. Follow last_executed_program or '
+                         'baseline_program for the structure. plan(context) returns a dictionary with exactly '
+                         'epochs and batch_size. Put batch_limit in proposal, outside plan. Return a complete corrected experiment.')
+    program = ast.dump(ast.parse(source), include_attributes=False)
+    values = [mode, proposal.get('batch_limit'), program, parent, training, validation, stage]
+    return hashlib.sha256(json.dumps(values, separators=(',', ':')).encode()).hexdigest()
+
+
 def train(rnd):
     stage = 'input'
     root = None
@@ -129,6 +145,37 @@ def train(rnd):
                     parent_artifact_id=rnd.parent.artifact_id, task_contract=rnd.task,
                     actual_platform_history=history, previous_native_state=previous,
                     required_next='experiment')
+        probes = None
+        adaptive = rnd.dataset_key in ('B', 'C')
+        if adaptive:
+            from .experiment_agent.probes import paired_probes
+            from .sdk_training import metrics
+            pilot_wall = time.monotonic()
+            pilot_cpu = time.process_time()
+            ledger = previous.get('experiments', []) if isinstance(previous, dict) else []
+            last = ledger[-1] if ledger else None
+            tail = 'log_mean_exp_asymmetric_error'
+            tail_conflict = (rnd.dataset_key == 'C' and last is not None and
+                             last['parent'] == rnd.parent.artifact_id and last['selected'] == 'parent' and
+                             last['after']['rmse'] < last['before']['rmse'] and last['after'][tail] > last['before'][tail])
+            probes, measured = paired_probes(model, prepared[1], prepared[2], metrics, tail_conflict)
+            probe_cost = {'wall_seconds': time.monotonic() - pilot_wall,
+                          'cpu_seconds': time.process_time() - pilot_cpu}
+            view['paired_probes'] = measured
+            if history and previous and isinstance(previous.get('proposal'), dict):
+                last_program = previous['proposal'].get('proposal', {}).get('program')
+                if isinstance(last_program, str):
+                    view['last_executed_program'] = last_program
+                    view.pop('baseline_program', None)
+            view['budget_example'] = ('batch_limit=1 runs a single real Adam update after the trained pilot. '
+                                      'Omit the limit for all batches. The prior ledger reports actual optimizer '
+                                      'updates and metrics on each side of Adam.')
+            view['stage_id'] = rnd.stage_id
+            view['actual_platform_history'] = [
+                {key: row[key] for key in ('id','round_index','selected_artifact_id','validation_metrics') if key in row}
+                for row in history]
+            view['previous_native_state'] = [
+                {k: v for k, v in entry.items() if k != 'signature'} for entry in ledger]
         if not history:
             from .round_prompt import START_PROGRAMS
             view['baseline_program'] = START_PROGRAMS[rnd.dataset_key]
@@ -137,13 +184,75 @@ def train(rnd):
             view['reference_experiment'] = 'Test this parent-only starting program; explain the hypothesis and falsifier. Use the observed measurements to guide the next proposal.'
         stage = 'proposal_model'
         prompt = TASK_PROPOSAL_PROMPTS[rnd.dataset_key]
-        if (isinstance(previous, dict)
-                and previous.get('supplied_parent_artifact_id') == rnd.parent.artifact_id
-                and previous.get('selected_artifact_id') == rnd.parent.artifact_id):
+        if adaptive:
+            prompt += ('\nYou have matched train-only pilot updates on the actual parent. paired_probes contains '
+                       'their scores on the current public validation rows BEFORE Adam. Set proposal.update_mode '
+                       'to the name of the pilot to continue. reference uses the usual task update; adam_only '
+                       'starts at the parent. long_life_head updates only the existing readout with long-life '
+                       'weighting; tail_conditioned uses tail-sensitive conditioned gradients; _half takes half '
+                       'the alternative displacement. All then execute your authored Adam program. Base this '
+                       'choice on current measured numbers, including the competing metric on C. Preserve a '
+                       'promising pilot with a gentle Adam control. Use the whole ledger of paired trials '
+                       'to avoid repeating an unsuccessful combination on the same parent and data. State '
+                       'one falsifiable prediction relative to this parent. Keep explanations brief.')
+        retained_last_parent = (isinstance(previous, dict) and previous.get('supplied_parent_artifact_id') == rnd.parent.artifact_id
+                                and previous.get('selected_artifact_id') == rnd.parent.artifact_id)
+        gas_recovery = (rnd.dataset_key == 'A' and rnd.round_index > 1 and isinstance(previous, dict)
+                        and previous.get('selected_artifact_id') == rnd.parent.artifact_id
+                        and (retained_last_parent or previous.get('gas_controls_enabled') is True))
+        if gas_recovery:
+            from .round_prompt import START_PROGRAMS
+            controls = {}
+            for mode in ('reference', 'adam_only'):
+                folder = root/('gas-control-' + mode)
+                folder.mkdir()
+                control = dict(operation='core_code', hypothesis='Measure the gas auxiliary update on the current parent.',
+                               expected_result='Different validation Macro-F1.', falsifier='Equal validation Macro-F1.',
+                               program=START_PROGRAMS['A'], update_mode=mode)
+                _, measured = continue_candidate(folder, prepared, control, gas_recovery=True)
+                scores = measured['local_validation_after']
+                controls[mode] = dict(macro_f1=scores['macro_f1'], accuracy=scores['accuracy'],
+                                      adam_steps=measured['core_steps_after'] - measured['core_steps_before'],
+                                      checkpoint_sha256=measured['checkpoint_sha256'])
+            view['gas_controls'] = dict(program=START_PROGRAMS['A'], steady_channel_dropout=False,
+                                        parent_sha256=hashes['parent'], train_sha256=hashes['train'],
+                                        validation_sha256=hashes['validation'], results=controls)
+            prompt += (' After the rollback, gas_controls contains two completed experiments on THIS parent and current '
+                       'validation rows using the same reference Adam program. reference includes the auxiliary gas '
+                       'update; adam_only omits it and inherits the parent Adam moments. Compare their Macro-F1 and '
+                       'the parent score. Choose proposal.update_mode as reference or adam_only. You may reuse the '
+                       'measured program and dropout setting or propose a different test. The resulting candidate '
+                       'will be measured before you decide whether to adopt it.')
+        if gas_recovery and retained_last_parent:
             prompt += ("\nThe previous experiment was rejected on THIS parent. Read its exact program, "
                        "training settings and measurement in previous_native_state. Repeating the "
                        "same executable settings on this seed will repeat the result. In reflection "
                        "name that experiment and identify a materially different change; implement it.")
+        if adaptive:
+            prompt += ('\nSet optional proposal.batch_limit (integer 1..256) to control the TOTAL Adam updates, '
+                       'or omit it for full epochs. For a promising measured pilot, first use a one-update '
+                       'control with a small learning rate so its measured change can be attributed. After seeing '
+                       'the pilot-to-final difference in the ledger, choose whether to lengthen or redirect '
+                       'the next experiment. C balanced interpolates the two train-only update directions. '
+                       'Use the actual RMSE and tail numbers, not the order of the modes. '
+                       'First compare the small control against this stage, then design the next test. '
+                       'Use the supplied source string as a syntax example. proposal.program must be a single JSON '
+                       'string defining the five functions. plan(context) returns exactly {"epochs":1,"batch_size":1024} '
+                       'with your chosen values. batch_limit belongs beside program, outside the Python plan. '
+                       'Limit reflection to three sentences and the selection reason to two.')
+        if adaptive:
+            prompt += (' A repeated, previously rejected executable experiment on the very same parent, split '
+                       'and stage is a step-size comparison: the harness halves the displacement from the parent '
+                       'and the effective Adam learning rate at each repetition. Changed data or parent starts '
+                       'a fresh comparison. You may instead design another experiment. On B compare the short-life '
+                       'and long-life public errors as well as the overall metric. residual_head is a damped readout update '
+                       'weighted by training residual size. Pick a trade-off justified by the measured table.')
+        if rnd.dataset_key == 'C' and tail_conflict:
+            prompt += (' The previous attempt reduced RMSE but increased the NASA penalty on this parent. '
+                       'Your new measured options calibrated_reference and calibrated_half make a training-only '
+                       'asymmetric-loss output-bias adjustment after a full or half reference step. '
+                       'Check which options improve both current metrics versus adam_only. If a trade-off persists, '
+                       'design a numerical experiment and state which measurement would justify accepting it.')
         def experiment(folder, text):
             try:
                 action = parse(text)
@@ -154,8 +263,18 @@ def train(rnd):
                     raise ValueError('Expected a nonempty hypothesis of at most 4000 UTF-8 bytes')
             except (TypeError, ValueError, RecursionError) as exc:
                 raise RejectedProposal(str(exc)) from exc
+            if adaptive:
+                proposed = action['proposal']
+                try:
+                    sig = experiment_key(proposed, proposed.get('update_mode', 'reference'),
+                                         hashes['parent'], hashes['train'], hashes['validation'], rnd.stage_id)
+                except (KeyError, SyntaxError, TypeError, ValueError, RecursionError) as exc:
+                    raise RejectedProposal(str(exc)) from exc
+                repeats = sum(entry.get('signature') == sig and entry['selected'] == 'parent' for entry in ledger)
+            else:
+                repeats = 0
             write(folder/'action.json', action)
-            candidate, report = continue_candidate(folder, prepared, action['proposal'])
+            candidate, report = continue_candidate(folder, prepared, action['proposal'], probes, 0.5 ** repeats, gas_recovery=gas_recovery)
             return action, candidate, report
 
         proposal_receipt, (action, candidate, report) = decision(
@@ -167,6 +286,18 @@ def train(rnd):
         configuration = dict(program_sha256=report['program_sha256'],
                              plan=report['numerical']['plan'],
                              parent_file_sha256=hashes['parent'], proposal_call_id=proposal_receipt.call_id)
+        if gas_recovery:
+            configuration.update(update_mode=report['update_mode'], gas_controls=controls,
+                                 adam_steps=report['core_steps_after'] - report['core_steps_before'])
+            change += ' Measured both gas update modes after rollback; continued with ' + report['update_mode'] + '.'
+        if adaptive:
+            configuration.update(update_mode=report['update_mode'], trial_scale=report['trial_scale'], batch_limit=proposal.get('batch_limit'),
+                                 training_start_sha256=report['training_start_sha256'],
+                                 candidate_sha256=report['checkpoint_sha256'], pilot_cost=probe_cost)
+            change = (f"From supplied parent, tested {len(probes)} train-only updates; continued "
+                      f"{report['update_mode']} at scale {report['trial_scale']:.4g} for {report['core_steps_after'] - report['core_steps_before']} Adam steps. "
+                      f"Paired RMSE {report['local_validation_before']['rmse']:.5g} to "
+                      f"{report['local_validation_after']['rmse']:.5g}.")
         seed = model.meta['seed']
         # Keep exact proposal and call receipt alongside the model, separate from protocol stdout.
         write(candidate/'proposal.json', action)
@@ -187,6 +318,16 @@ def train(rnd):
                            local_diagnostics={'scope':'not platform measurements',
                                'before':report['local_validation_before'],
                                'after':report['local_validation_after']})
+        if adaptive:
+            select_view.pop('actual_platform_history')
+            select_view['stage_id'] = rnd.stage_id
+            select_view['trial_scale'] = report['trial_scale']
+            select_view['parent_artifact'] = {'artifact_id': rnd.parent.artifact_id}
+            select_view['proposal'] = {'hypothesis': proposal['hypothesis'], 'update_mode': report['update_mode']}
+            select_view['matched_pair'] = select_view.pop('local_diagnostics')
+            select_view['instruction'] = ('Use only measurements paired on current validation rows. '
+                                          'An earlier receipt for the same parent can describe another stage. '
+                                          'Give a concise reason with the two measured values.')
         if rnd.dataset_key == 'A':
             select_view['same_round_macro_f1'] = {label: report['local_validation_' + phase]['macro_f1']
                                                   for label, phase in [('parent', 'before'), ('candidate', 'after')]}
@@ -214,7 +355,18 @@ def train(rnd):
         selection_prompt = SELECT_PROMPT + '\n' + TASK_SELECTION_HINTS[rnd.dataset_key]
         choice_receipt, chosen = decision(rnd, root, 'selection', selection_prompt, select_view, choose)
         stage = 'state_save'
-        write(state/'last-round.json', dict(dataset_key=rnd.dataset_key, round_index=rnd.round_index,
+        if adaptive:
+            ledger = ledger + [dict(round=rnd.round_index, stage=rnd.stage_id,
+                          parent=rnd.parent.artifact_id, validation_sha256=hashes['validation'],
+                          experiment=proposal['hypothesis'][:320], mode=report['update_mode'],
+                          plan=configuration['plan'], learning_rate=report['numerical']['history'][0]['learning_rate_first'],
+                          batch_limit=proposal.get('batch_limit'), steps=report['core_steps_after']-report['core_steps_before'],
+                          before_adam=report['before_adam'], trial_scale=report['trial_scale'],
+                          signature=experiment_key(proposal, report['update_mode'], hashes['parent'], hashes['train'],
+                                                   hashes['validation'], rnd.stage_id),
+                          before=report['local_validation_before'], after=report['local_validation_after'],
+                          selected=chosen['selected_role'])]
+        write(state/'last-round.json', dict(**({'experiments': ledger} if adaptive else {}), **({'gas_controls_enabled': True} if gas_recovery else {}), dataset_key=rnd.dataset_key, round_index=rnd.round_index,
               supplied_parent_artifact_id=rnd.parent.artifact_id, candidate_receipt=submitted,
               selected_artifact_id=chosen['selected_artifact_id'], reason=chosen['reason'],
               proposal=action, selection_receipt={'call_id':choice_receipt.call_id, 'response':choice_receipt.response},

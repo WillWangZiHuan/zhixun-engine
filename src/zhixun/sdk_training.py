@@ -66,18 +66,29 @@ def prepare(parent, train_path, validation_path, profile, task):
     return model, train, valid, inputs, {k:digest(p) for k,p in inputs.items()}, view
 
 
-def continue_candidate(root, prepared, proposal):
+def continue_candidate(root, prepared, proposal, probes=None, trial_scale=1.0, gas_recovery=False):
     model, train, valid, inputs, hashes, view = prepared
     try:
         _validate_proposal(proposal, model.meta['profile'])
     except (SyntaxError, ValueError, TypeError) as exc:
         raise RejectedProposal(str(exc)) from exc
+    if model.meta['profile'] == 'A' and 'update_mode' in proposal and not gas_recovery:
+        raise RejectedProposal('A update_mode is available only after a rollback on this parent. Omit the field for this round.')
+    if gas_recovery and 'update_mode' not in proposal:
+        raise RejectedProposal('Read gas_controls and explicitly choose proposal.update_mode reference or adam_only. Return the complete proposal.')
     case = root/'work'
     case.mkdir()
     shutil.copyfile(inputs['parent'], case/'parent.npz')
+    if probes is not None:
+        mode = proposal.get('update_mode', 'reference')
+        if not isinstance(mode, str) or mode not in probes:
+            raise RejectedProposal('Choose update_mode from the measured options: ' + ', '.join(probes))
+        from .experiment_agent.probes import scaled_probe
+        warm = scaled_probe(model, probes[mode], trial_scale)
+        warm.save(case/'training-start.npz')
     np.savez_compressed(case/'train.npz', x=train['x'], y=train['y'])
     write(case/'job.json', dict(proposal=proposal, parent_kind='core',
-                               context=view['context'], cpu_seconds=20))
+                               context=view['context'], trial_scale=trial_scale, cpu_seconds=20))
     supervision = supervise(case, 'zhixun.experiment_agent.task_worker')
     if not (case/'execution.json').exists():
         raise RuntimeError('Worker produced no receipt; exit=%s timeout=%s; see work/stderr.log' %
@@ -114,5 +125,11 @@ def continue_candidate(root, prepared, proposal):
                   source_input_hashes=hashes, local_validation_before=view['parent_validation_metrics'],
                   local_validation_after=metrics(candidate, valid), device_metadata_used=False,
                   device_split_verified=False, platform_score_claimed=False)
+    if probes is not None:
+        report['update_mode'] = mode
+        report['trial_scale'] = trial_scale
+        report['before_adam'] = metrics(warm, valid)
+    if gas_recovery:
+        report['update_mode'] = proposal['update_mode']
     write(target/'training.json', report)
     return target, report

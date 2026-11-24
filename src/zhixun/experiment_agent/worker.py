@@ -5,14 +5,15 @@ import numpy as np
 from baselines.model import Model
 from .program import compile_program,check_gradient
 
-def train(parent,data,source,context,output,steady_dropout=False):
+def train(parent,data,source,context,output,steady_dropout=False,prepared_update=False,batch_limit=None,trial_scale=1.0,skip_gas_update=False):
     output=Path(output);output.mkdir(exist_ok=False);started=time.monotonic();program=compile_program(source);model=Model.load(parent);task=model.meta['task'];check=check_gradient(program['loss'],task)
     with np.load(data,allow_pickle=False) as d:x=d['x'].copy();y=d['y'].copy();groups=d['groups'].copy() if 'groups' in d.files else None
     if groups is not None and (groups.dtype.kind not in 'iu' or groups.shape!=y.shape or set(np.unique(groups))!=set(range(int(groups.max())+1))):raise ValueError('invalid training groups')
     gas_steps = None
     if model.meta['profile'] == 'A':
-        from .gas_update import continue_gas
-        gas_steps = continue_gas(model, x, y)
+        if not skip_gas_update:
+            from .gas_update import continue_gas
+            gas_steps = continue_gas(model, x, y)
         if steady_dropout:
             keep = np.arange(len(model.mean)) % 8 == 1
             masked = np.where(keep, x, model.mean)
@@ -21,11 +22,11 @@ def train(parent,data,source,context,output,steady_dropout=False):
             if groups is not None:
                 groups = np.tile(groups, 5)
     bearing_steps = None
-    if model.meta['profile'] == 'B':
+    if model.meta['profile'] == 'B' and not prepared_update:
         from .bearing_update import continue_bearing
         bearing_steps = continue_bearing(model, x, y)
     engine_steps = None
-    if model.meta['profile'] == 'C':
+    if model.meta['profile'] == 'C' and not prepared_update:
         from .engine_update import continue_engine
         engine_steps = continue_engine(model, x, y)
     x=model.normalized(x)
@@ -49,10 +50,14 @@ def train(parent,data,source,context,output,steady_dropout=False):
                          'Return np.asarray([w0,w1,w2,w3,w4,w5])[y] with your six numeric weights.')
     weights=weights/weights.mean();weights.setflags(write=False);before_steps=model.meta['steps'];before_epochs=model.meta['epochs'];history=[];updates=0
     for epoch in range(epochs):
-        default=np.random.default_rng(np.random.SeedSequence([model.meta['seed'],model.meta['epochs']])).permutation(len(x));default.setflags(write=False)
+        shuffle_seed = [model.meta['seed'], model.meta['epochs']]
+        if batch_limit is not None and batch_limit * batch < len(x) * epochs:
+            shuffle_seed.append(model.meta['steps'])
+        default=np.random.default_rng(np.random.SeedSequence(shuffle_seed)).permutation(len(x));default.setflags(write=False)
         order=np.asarray(program['batch_order'](default,groups,y,model.meta['epochs']))
         if order.dtype.kind not in 'iu' or order.shape!=(len(x),) or not np.array_equal(np.sort(order),np.arange(len(x))):raise ValueError('batch order must be a permutation of training rows')
         total=0.;rates=[]
+        seen = 0
         for start in range(0,len(x),batch):
             idx=order[start:start+batch];xb=x[idx];yb=y[idx];wb=weights[idx];hidden,logits=model.forward(xb);pred=logits[:,0] if task=='regression' else logits
             for a in (pred,yb,wb):a.setflags(write=False)
@@ -62,11 +67,17 @@ def train(parent,data,source,context,output,steady_dropout=False):
             grad={'w2':hidden.T@matrix,'b2':matrix.sum(axis=0)};dz=(matrix@model.params['w2'].T)*(1-hidden**2);grad.update(w1=xb.T@dz,b1=dz.sum(0));norm=math.sqrt(sum(float(np.sum(g*g)) for g in grad.values()))
             rate=program['learning_rate'](updates,dict(context))
             if type(rate) not in (int,float,np.float64) or not math.isfinite(rate) or not 1e-6<=rate<=.1:raise ValueError('learning rate outside [1e-6,.1]')
+            rate *= trial_scale
             model.meta['steps']+=1;updates+=1
             for k,g in grad.items():
                 g=g*min(1.,5./max(norm,1e-12));model.first[k]=.9*model.first[k]+.1*g;model.second[k]=.999*model.second[k]+.001*g*g;first=model.first[k]/(1-.9**model.meta['steps']);second=model.second[k]/(1-.999**model.meta['steps']);model.params[k]-=rate*first/(np.sqrt(second)+1e-8)
             total+=float(loss)*len(idx);rates.append(float(rate))
-        model.meta['epochs']+=1;history.append(dict(epoch=model.meta['epochs'],loss=total/len(x),steps=model.meta['steps'],learning_rate_first=rates[0],learning_rate_last=rates[-1]))
+            seen += len(idx)
+            if batch_limit is not None and updates >= batch_limit:
+                break
+        model.meta['epochs']+=int(seen==len(x));history.append(dict(epoch=model.meta['epochs'],rows_seen=seen,loss=total/seen,steps=model.meta['steps'],learning_rate_first=rates[0],learning_rate_last=rates[-1]))
+        if batch_limit is not None and updates >= batch_limit:
+            break
     model.meta['batch_size']=batch;model.meta['learning_rate']=rates[-1];model.validate();model.save(output/'checkpoint.npz');report=dict(complete=True,plan=plan,initial_steps=before_steps,final_steps=model.meta['steps'],initial_epochs=before_epochs,final_epochs=model.meta['epochs'],gradient_check=check,train_rows=len(x),weight_min=float(weights.min()),weight_max=float(weights.max()),wall_seconds=time.monotonic()-started,history=history)
     if bearing_steps is not None:
         report['bearing_curvature_steps'] = bearing_steps

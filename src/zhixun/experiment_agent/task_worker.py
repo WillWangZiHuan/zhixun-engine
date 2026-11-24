@@ -22,9 +22,15 @@ def train(case):
     model = Model.load(parent)
     _validate_proposal(proposal, model.meta["profile"])
     data_path = case / "train.npz"
-    numerical = train_core(parent, data_path, program, job["context"], result,
-                           steady_dropout=proposal.get("steady_channel_dropout", False))
-    return dict(complete=True, numerical=numerical, core_steps_before=numerical["initial_steps"],
+    seed_path = case / "training-start.npz"
+    numerical = train_core(seed_path if seed_path.exists() else parent, data_path, program, job["context"], result,
+                           steady_dropout=proposal.get("steady_channel_dropout", False),
+                           prepared_update=seed_path.exists(), batch_limit=proposal.get("batch_limit"),
+                           trial_scale=job.get("trial_scale", 1.0),
+                           skip_gas_update=model.meta["profile"] == "A" and proposal.get("update_mode") == "adam_only")
+    training_start = seed_path if seed_path.exists() else parent
+    warm_digest = hashlib.sha256(training_start.read_bytes()).hexdigest()
+    return dict(complete=True, numerical=numerical, training_start_sha256=warm_digest, core_steps_before=numerical["initial_steps"],
                 core_steps_after=numerical["final_steps"], core_parent_matches_selected=True,
                 core_parent_sha256=hashlib.sha256(parent.read_bytes()).hexdigest(),
                 model_kind="core", checkpoint="checkpoint.npz", train_only=True,
