@@ -97,6 +97,12 @@ def validate(source):
             line=line,column=col,end_line=end_line,end_column=end_col,
             source_segment=segment[:256] if segment is not None else None,
             allowed_call_forms='np.<listed function>(...) or <listed builtin or loss operator>(...); see request.numerical_functions. Array method calls are not allowed.')
+        if isinstance(node, (ast.ListComp, ast.Assign)):
+            detail['row_weight_examples'] = [
+                'return np.where(y == 0, 2.0, np.where(y == 3, 1.5, 1.0))',
+                'return np.asarray([2.0, 1.0, 1.0, 1.5, 1.0, 1.0])[y]',
+            ]
+            detail['instruction'] = 'Use the vectorized expression with the classes and weights from your own hypothesis.'
         if location is not None and location is not node:detail['location_node_type']=type(location).__name__
         if segment is not None and len(segment)>256:detail['source_segment_truncated']=True
         message=json.dumps(detail,ensure_ascii=False,separators=(',',':'))

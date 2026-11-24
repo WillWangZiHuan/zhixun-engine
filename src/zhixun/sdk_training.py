@@ -5,7 +5,7 @@ import json
 import shutil
 import numpy as np
 from baselines.data import read_dataset, json_value
-from .checkpoint import load_checkpoint, kind, core
+from baselines.model import Model
 from .experiment_agent.program import default_program
 from .experiment_agent.task_tools import _validate_proposal
 from .experiment_agent.unified_protocol import NUMERICAL_FUNCTIONS
@@ -44,7 +44,7 @@ def prepare(parent, train_path, validation_path, profile, task):
     for name, path in inputs.items():
         if path.is_symlink() or not path.is_file():
             raise ValueError('Regular input file required: '+name)
-    model = load_checkpoint(parent)
+    model = Model.load(parent)
     if model.meta['profile'] != profile or model.meta['task'] != task:
         raise ValueError('Parent task/profile differs from frozen task contract')
     train = read_dataset(train_path, task, model.meta['classes'], model.meta['paths'])
@@ -55,7 +55,7 @@ def prepare(parent, train_path, validation_path, profile, task):
                    current_learning_rate=model.meta['learning_rate'], parent_steps=model.meta['steps'],
                    parent_epochs=model.meta['epochs'], remaining_cpu_seconds=20,
                    device_groups_available=False)
-    view = dict(profile=profile, seed=model.meta['seed'], parent_kind=kind(model), context=context,
+    view = dict(profile=profile, seed=model.meta['seed'], parent_kind='core', context=context,
                 train_rows=len(train['y']), validation_rows=len(valid['y']),
                 parent_training_metrics=metrics(model, train),
                 parent_validation_metrics=metrics(model, valid),
@@ -76,7 +76,7 @@ def continue_candidate(root, prepared, proposal):
     case.mkdir()
     shutil.copyfile(inputs['parent'], case/'parent.npz')
     np.savez_compressed(case/'train.npz', x=train['x'], y=train['y'])
-    write(case/'job.json', dict(proposal=proposal, parent_kind=kind(model),
+    write(case/'job.json', dict(proposal=proposal, parent_kind='core',
                                context=view['context'], cpu_seconds=20))
     supervision = supervise(case, 'zhixun.experiment_agent.task_worker')
     if not (case/'execution.json').exists():
@@ -92,8 +92,8 @@ def continue_candidate(root, prepared, proposal):
             raise RejectedProposal(message)
         raise RuntimeError(message)
     source = case/'result/checkpoint.npz'
-    candidate = load_checkpoint(source)
-    before, after = core(model), core(candidate)
+    candidate = Model.load(source)
+    before, after = model, candidate
     if after.meta['steps'] <= before.meta['steps']:
         raise ValueError('No actual optimizer continuation')
     for name in ('mean', 'scale'):
@@ -108,9 +108,9 @@ def continue_candidate(root, prepared, proposal):
     target.mkdir()
     shutil.copyfile(source, target/'checkpoint.npz')
     np.testing.assert_array_equal(candidate.predict(valid['x']),
-                                  load_checkpoint(target/'checkpoint.npz').predict(valid['x']))
+                                  Model.load(target/'checkpoint.npz').predict(valid['x']))
     report = dict(execution['training'], parent_file_sha256=hashes['parent'],
-                  checkpoint_sha256=digest(target/'checkpoint.npz'), model_kind=kind(candidate),
+                  checkpoint_sha256=digest(target/'checkpoint.npz'), model_kind='core',
                   source_input_hashes=hashes, local_validation_before=view['parent_validation_metrics'],
                   local_validation_after=metrics(candidate, valid), device_metadata_used=False,
                   device_split_verified=False, platform_score_claimed=False)

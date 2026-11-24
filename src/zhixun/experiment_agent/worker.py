@@ -2,13 +2,32 @@
 from pathlib import Path
 import json,math,time,resource,os,sys
 import numpy as np
-from ..checkpoint import load_checkpoint, save_checkpoint
+from baselines.model import Model
 from .program import compile_program,check_gradient
 
-def train(parent,data,source,context,output):
-    output=Path(output);output.mkdir(exist_ok=False);started=time.monotonic();program=compile_program(source);model=load_checkpoint(parent,'core');task=model.meta['task'];check=check_gradient(program['loss'],task)
+def train(parent,data,source,context,output,steady_dropout=False):
+    output=Path(output);output.mkdir(exist_ok=False);started=time.monotonic();program=compile_program(source);model=Model.load(parent);task=model.meta['task'];check=check_gradient(program['loss'],task)
     with np.load(data,allow_pickle=False) as d:x=d['x'].copy();y=d['y'].copy();groups=d['groups'].copy() if 'groups' in d.files else None
     if groups is not None and (groups.dtype.kind not in 'iu' or groups.shape!=y.shape or set(np.unique(groups))!=set(range(int(groups.max())+1))):raise ValueError('invalid training groups')
+    gas_steps = None
+    if model.meta['profile'] == 'A':
+        from .gas_update import continue_gas
+        gas_steps = continue_gas(model, x, y)
+        if steady_dropout:
+            keep = np.arange(len(model.mean)) % 8 == 1
+            masked = np.where(keep, x, model.mean)
+            x = np.concatenate([x, masked, masked, masked, masked])
+            y = np.tile(y, 5)
+            if groups is not None:
+                groups = np.tile(groups, 5)
+    bearing_steps = None
+    if model.meta['profile'] == 'B':
+        from .bearing_update import continue_bearing
+        bearing_steps = continue_bearing(model, x, y)
+    engine_steps = None
+    if model.meta['profile'] == 'C':
+        from .engine_update import continue_engine
+        engine_steps = continue_engine(model, x, y)
     x=model.normalized(x)
     if task=='regression':y=(y-model.meta['target_mean'])/model.meta['target_scale']
     elif y.dtype.kind not in 'iu' or np.any(y<0) or np.any(y>=len(model.meta['classes'])):raise ValueError('invalid class labels')
@@ -17,10 +36,17 @@ def train(parent,data,source,context,output):
     if not isinstance(plan,dict) or set(plan)!={'epochs','batch_size'}:raise ValueError('plan fields must be epochs,batch_size')
     epochs,batch=plan['epochs'],plan['batch_size']
     if type(epochs) is not int or not 1<=epochs<=5 or type(batch) is not int or not 16<=batch<=4096:raise ValueError('training plan exceeds limits')
-    if epochs * math.ceil(len(x) / batch) > 1500:
-        raise ValueError('Plan exceeds 1500 updates for the current training set')
     weights=np.asarray(program['sample_weights'](x,y,groups,dict(context)),dtype=float)
-    if weights.shape!=y.shape or not np.isfinite(weights).all() or np.any(weights<0) or weights.sum()<=0:raise ValueError('weights must be finite nonnegative and nonempty')
+    if weights.shape != y.shape:
+        raise ValueError(f'sample_weights returned shape {weights.shape}; expected {y.shape}, one scalar per row.')
+    if not np.isfinite(weights).all() or np.any(weights < 0) or not np.isfinite(weights.sum()) or weights.sum() <= 0:
+        if task == 'regression':
+            raise ValueError('Regression sample_weights receives STANDARDIZED y, which can be negative. '
+                             'y/mean(y) can produce invalid weights. Use a positive mapping consistent with your hypothesis, '
+                             'such as np.where(y > np.quantile(y, 0.75), 2.0, 1.0) for long-life emphasis. '
+                             f'Observed {int(np.sum(weights < 0))} negative and {int(np.sum(~np.isfinite(weights)))} nonfinite weights.')
+        raise ValueError('Class weights must be finite and nonnegative with positive sum. '
+                         'Return np.asarray([w0,w1,w2,w3,w4,w5])[y] with your six numeric weights.')
     weights=weights/weights.mean();weights.setflags(write=False);before_steps=model.meta['steps'];before_epochs=model.meta['epochs'];history=[];updates=0
     for epoch in range(epochs):
         default=np.random.default_rng(np.random.SeedSequence([model.meta['seed'],model.meta['epochs']])).permutation(len(x));default.setflags(write=False)
@@ -41,7 +67,13 @@ def train(parent,data,source,context,output):
                 g=g*min(1.,5./max(norm,1e-12));model.first[k]=.9*model.first[k]+.1*g;model.second[k]=.999*model.second[k]+.001*g*g;first=model.first[k]/(1-.9**model.meta['steps']);second=model.second[k]/(1-.999**model.meta['steps']);model.params[k]-=rate*first/(np.sqrt(second)+1e-8)
             total+=float(loss)*len(idx);rates.append(float(rate))
         model.meta['epochs']+=1;history.append(dict(epoch=model.meta['epochs'],loss=total/len(x),steps=model.meta['steps'],learning_rate_first=rates[0],learning_rate_last=rates[-1]))
-    model.meta['batch_size']=batch;model.meta['learning_rate']=rates[-1];model.validate();save_checkpoint(model,output/'checkpoint.npz');report=dict(complete=True,plan=plan,initial_steps=before_steps,final_steps=model.meta['steps'],initial_epochs=before_epochs,final_epochs=model.meta['epochs'],gradient_check=check,train_rows=len(x),weight_min=float(weights.min()),weight_max=float(weights.max()),wall_seconds=time.monotonic()-started,history=history)
+    model.meta['batch_size']=batch;model.meta['learning_rate']=rates[-1];model.validate();model.save(output/'checkpoint.npz');report=dict(complete=True,plan=plan,initial_steps=before_steps,final_steps=model.meta['steps'],initial_epochs=before_epochs,final_epochs=model.meta['epochs'],gradient_check=check,train_rows=len(x),weight_min=float(weights.min()),weight_max=float(weights.max()),wall_seconds=time.monotonic()-started,history=history)
+    if bearing_steps is not None:
+        report['bearing_curvature_steps'] = bearing_steps
+    if gas_steps is not None:
+        report['gas_pair_steps'] = gas_steps
+    if engine_steps is not None:
+        report['engine_conditioned_steps'] = engine_steps
     (output/'training.json').write_text(json.dumps(report,indent=2)+'\n');return report
 
 def main():

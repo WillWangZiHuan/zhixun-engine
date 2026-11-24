@@ -9,7 +9,9 @@ import sys
 from contest_harness.errors import HarnessError
 from baselines.data import json_value
 from baselines.predict import predict as model_predict
-from .checkpoint import MAX_BYTES, load_checkpoint, core
+from baselines.model import Model
+
+MAX_BYTES = 64 * 1024 * 1024
 from .experiment_agent.unified_protocol import parse
 from .sdk_training import RejectedProposal, prepare, continue_candidate, write
 from .round_prompt import TASK_PROPOSAL_PROMPTS, TASK_SELECTION_HINTS
@@ -20,7 +22,7 @@ SELECT_PROMPT = '''Choose between the supplied parent artifact and the new candi
 actual platform candidate receipt, task contract, experiment and history. The host owns
 measurement; local diagnostics are not platform scores. Do not invent missing measurements,
 causality, hidden-test gains or call IDs. Return exactly one JSON object containing
-selected_artifact_id (one of allowed_artifact_ids) and reason (nonempty, <=4000 UTF-8 bytes).
+selected_role (exactly "parent" or "candidate") and reason (nonempty, <=4000 UTF-8 bytes). The harness binds your chosen role to this round’s real host receipt.
 Explain your decision from the available evidence. No Markdown or other fields.'''
 
 
@@ -32,11 +34,22 @@ def safe_error(error):
     return text[:2000]
 
 
-def call_model(rnd, root, name, prompt, view):
+def call_model(rnd, root, name, prompt, view, feedback):
     folder = root/name
     folder.mkdir()
     messages = [{'role':'system', 'content':prompt},
                 {'role':'user', 'content':json.dumps(view, ensure_ascii=False, allow_nan=False)}]
+    if feedback is not None:
+        diagnostic = {k: v for k, v in feedback.items() if k != 'previous_reply'}
+        action = 'Revise the failed decision using the execution error. Return one complete corrected JSON decision.'
+        if 'Regression sample_weights receives STANDARDIZED y' in diagnostic['error']:
+            action = ('Rewrite the failed experiment now. In sample_weights return a positive vector even '
+                      'for negative standardized targets. Use the quantile-weight expression shown in the '
+                      'execution error if it matches your intent, or choose a different valid experiment. '
+                      'Return the complete experiment JSON.')
+        correction = dict(revision_request=diagnostic, required_next=action)
+        messages.extend([{'role': 'assistant', 'content': feedback['previous_reply']},
+                         {'role': 'user', 'content': json.dumps(correction, ensure_ascii=False)}])
     write(folder/'messages.json', messages)
     max_tokens = min(rnd.max_output_tokens, MAX_OUTPUT_TOKENS)
     print(json.dumps(dict(dataset=rnd.dataset_key, round_index=rnd.round_index, stage=name,
@@ -53,8 +66,7 @@ def decision(rnd, root, name, prompt, view, evaluate):
     feedback = None
     for attempt in range(1, 4):
         label = name if attempt == 1 else f'{name}-{attempt}'
-        request = view if feedback is None else {**view, 'revision_request': feedback}
-        receipt = call_model(rnd, root, label, prompt, request)
+        receipt = call_model(rnd, root, label, prompt, view, feedback)
         folder = root/label
         text = receipt.text
         try:
@@ -69,22 +81,25 @@ def decision(rnd, root, name, prompt, view, evaluate):
         except RejectedProposal as error:
             feedback = dict(rejected_call_id=receipt.call_id, error=safe_error(error),
                             previous_reply=text[:16000],
-                            instruction='Correct the reported error and return one complete new decision.')
+                            instruction=('Correct the reported error and return one complete new decision. '
+                                         'For an invalid training proposal change the executable expression that failed. '
+                                         'Changing its explanation alone repeats the same error.'))
             write(folder/'rejection.json', feedback)
             if attempt == 3:
                 raise
 
 
-def selection(text, allowed):
+def selection(text, parent_id, candidate_id):
     value = json_value(text)
-    if not isinstance(value, dict) or set(value) != {'selected_artifact_id', 'reason'}:
-        raise ValueError('Selection must contain selected_artifact_id and reason')
-    if value['selected_artifact_id'] not in allowed:
-        raise ValueError('Model selected an artifact outside this decision')
+    if not isinstance(value, dict) or set(value) != {'selected_role', 'reason'}:
+        raise ValueError('Return exactly selected_role ("parent" or "candidate") and reason.')
+    role = value['selected_role']
+    if role not in ('parent', 'candidate'):
+        raise ValueError('selected_role must be the literal "parent" or "candidate".')
     reason = value['reason']
     if not isinstance(reason, str) or not reason.strip() or len(reason.encode('utf-8')) > 4000:
         raise ValueError('Selection reason must be nonempty and <=4000 bytes')
-    return value
+    return dict(selected_role=role, selected_artifact_id=parent_id if role == 'parent' else candidate_id, reason=reason)
 
 
 def train(rnd):
@@ -114,35 +129,19 @@ def train(rnd):
                     parent_artifact_id=rnd.parent.artifact_id, task_contract=rnd.task,
                     actual_platform_history=history, previous_native_state=previous,
                     required_next='experiment')
-        if rnd.dataset_key == 'B' and not history:
-            from .round_prompt import B_START_PROGRAM
-            view['baseline_program'] = B_START_PROGRAM
-            view['reference_experiment'] = {
-                'scope': 'Starting public experiment, not an already measured result on this run.',
-                'hypothesis': 'A short Huber continuation that doubles upper-quartile lifetime weights can reduce long-lifetime underprediction.',
-                'instruction': 'Test the supplied baseline_program as written from this starting checkpoint. Explain the upper-quartile weight contrast in reflection; a uniform-weight run is a different control.',
-            }
-        elif rnd.dataset_key == 'C' and not history:
-            view['reference_experiment'] = {
-                'program': view['baseline_program'],
-                'supplement': {'kind': 'residual_trees', 'trees': 12, 'learning_rate': 0.08},
-                'instruction': 'Establish the forest parent using the supplied program and supplement together, then compare both measured errors.',
-            }
-        elif rnd.dataset_key == 'C' and view['parent_kind'] == 'residual_boost':
-            view['reference_experiment'] = {
-                'program': view['baseline_program'],
-                'invariant': 'Keep sample_weights uniform, batch_order unchanged, and the fitted trees frozen. Omit supplement.',
-                'first_test': 'Use baseline_program as written for the first matched core-only experiment.',
-                'later_tests': 'Keep the numerical program simple. Choose one factor from the measured history: a different constant positive learning-rate multiplier, batch size, or Huber delta. Edit only that factor of the supplied reference program.',
-                'learning_rate_contract': 'step is the zero-based update index in this proposal. The last partial batch also counts. In this core-only experiment use a CONSTANT learning rate, e.g. return 0.5 * context["suggested_learning_rate"]. Never divide step by this epoch length or implement a decay schedule. Keep the returned rate in [1e-6, 0.1] throughout.',
-            }
+        if not history:
+            from .round_prompt import START_PROGRAMS
+            view['baseline_program'] = START_PROGRAMS[rnd.dataset_key]
+            if rnd.dataset_key == 'A':
+                view['starting_options'] = {'steady_channel_dropout': False}
+            view['reference_experiment'] = 'Test this parent-only starting program; explain the hypothesis and falsifier. Use the observed measurements to guide the next proposal.'
         stage = 'proposal_model'
         prompt = TASK_PROPOSAL_PROMPTS[rnd.dataset_key]
         if (isinstance(previous, dict)
                 and previous.get('supplied_parent_artifact_id') == rnd.parent.artifact_id
                 and previous.get('selected_artifact_id') == rnd.parent.artifact_id):
             prompt += ("\nThe previous experiment was rejected on THIS parent. Read its exact program, "
-                       "supplement, readout and measurement in previous_native_state. Repeating the "
+                       "training settings and measurement in previous_native_state. Repeating the "
                        "same executable settings on this seed will repeat the result. In reflection "
                        "name that experiment and identify a materially different change; implement it.")
         def experiment(folder, text):
@@ -164,10 +163,9 @@ def train(rnd):
         proposal = action['proposal']
         change = ('Continued supplied parent from %d to %d Adam steps; full model kind=%s; '
                   'program sha256=%s; no device metadata used.' %
-                  (core(model).meta['steps'], report['core_steps_after'], report['model_kind'], report['program_sha256']))
+                  (model.meta['steps'], report['core_steps_after'], report['model_kind'], report['program_sha256']))
         configuration = dict(program_sha256=report['program_sha256'],
-                             plan=report['numerical']['plan'], supplement=proposal.get('supplement'),
-                             readout_expression=proposal.get('readout_expression'),
+                             plan=report['numerical']['plan'],
                              parent_file_sha256=hashes['parent'], proposal_call_id=proposal_receipt.call_id)
         seed = model.meta['seed']
         # Keep exact proposal and call receipt alongside the model, separate from protocol stdout.
@@ -183,12 +181,15 @@ def train(rnd):
         write(root/'candidate-receipt.json', submitted)
         stage = 'selection_model'
         allowed = [rnd.parent.artifact_id, submitted['artifact_id']]
-        select_view = dict(allowed_artifact_ids=allowed, parent_artifact=rnd.parent.receipt,
+        select_view = dict(allowed_artifact_ids=allowed, allowed_roles=['parent', 'candidate'], parent_artifact=rnd.parent.receipt,
                            candidate_receipt=submitted, task_contract=rnd.task,
                            actual_platform_history=history, proposal=action,
                            local_diagnostics={'scope':'not platform measurements',
                                'before':report['local_validation_before'],
                                'after':report['local_validation_after']})
+        if rnd.dataset_key == 'A':
+            select_view['same_round_macro_f1'] = {label: report['local_validation_' + phase]['macro_f1']
+                                                  for label, phase in [('parent', 'before'), ('candidate', 'after')]}
         if rnd.dataset_key == 'C':
             before = report['local_validation_before']
             after = report['local_validation_after']
@@ -204,7 +205,7 @@ def train(rnd):
             }
         def choose(folder, text):
             try:
-                chosen = selection(text, allowed)
+                chosen = selection(text, rnd.parent.artifact_id, submitted['artifact_id'])
             except (TypeError, ValueError, RecursionError) as exc:
                 raise RejectedProposal(str(exc)) from exc
             write(folder/'action.json', chosen)
@@ -237,7 +238,7 @@ def train(rnd):
 
 @lru_cache(maxsize=1)
 def prediction_model(path):
-    return load_checkpoint(Path(path))
+    return Model.load(Path(path))
 
 
 def predict(sample, model_dir):
