@@ -145,6 +145,13 @@ def train(rnd):
                     parent_artifact_id=rnd.parent.artifact_id, task_contract=rnd.task,
                     actual_platform_history=trend, previous_native_state=previous_experiment,
                     required_next='experiment')
+        if rnd.dataset_key == 'B':
+            from .experiment_agent.matched_history import open_history, append_result, prompt_history
+            history_file = state/'bearing-history.json'
+            last_b = json_value(history_file.read_text()) if history_file.is_file() else None
+            matched = open_history(last_b, rnd.dataset_key, rnd.stage_id, hashes)
+            if matched['experiments']:
+                view['matched_experiments'] = prompt_history(matched)
         if not history:
             from .round_prompt import START_PROGRAMS
             view['baseline_program'] = START_PROGRAMS[rnd.dataset_key]
@@ -205,6 +212,8 @@ def train(rnd):
                            local_diagnostics={'scope':'not platform measurements',
                                'before':report['local_validation_before'],
                                'after':report['local_validation_after']})
+        if rnd.dataset_key == 'B' and matched['experiments']:
+            select_view['matched_experiments'] = prompt_history(matched, report)
         if rnd.dataset_key == 'A':
             select_view['same_round_macro_f1'] = {label: report['local_validation_' + phase]['macro_f1']
                                                   for label, phase in [('parent', 'before'), ('candidate', 'after')]}
@@ -237,6 +246,9 @@ def train(rnd):
               selected_artifact_id=chosen['selected_artifact_id'], reason=chosen['reason'],
               proposal=action, selection_receipt={'call_id':choice_receipt.call_id, 'response':choice_receipt.response},
               model_call_ids=list(rnd.call_ids), history_ids=[item['id'] for item in history]))
+        if rnd.dataset_key == 'B':
+            append_result(matched, rnd.round_index, proposal['program'], report, chosen['selected_role'], chosen['reason'])
+            write(history_file, matched)
         rnd.save_state(state)
         stage = 'finish'
         rnd.finish(selected_artifact_id=chosen['selected_artifact_id'], hypothesis=proposal['hypothesis'],
