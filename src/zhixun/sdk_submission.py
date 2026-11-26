@@ -15,7 +15,7 @@ from baselines.model import Model
 MAX_BYTES = 64 * 1024 * 1024
 from .experiment_agent.unified_protocol import parse
 from .sdk_training import RejectedProposal, prepare, continue_candidate, write
-from .round_prompt import TASK_PROPOSAL_PROMPTS, TASK_SELECTION_HINTS
+from .round_prompt import PROMPT, TASK_PROPOSAL_PROMPTS, TASK_SELECTION_HINTS
 
 PREDICT_ARGV = ['python3', '/app/harness.py', 'predict']
 MAX_OUTPUT_TOKENS = 16_384
@@ -133,6 +133,14 @@ def previous_decision_prompt(prompt, view, previous, condition):
     if previous_parent != view['parent_artifact_id']:
         changed.append('parent_artifact_id')
     if not changed and not unknown:
+        last_update = previous.get('bearing_update')
+        if condition['dataset_key'] == 'B' and isinstance(last_update, dict):
+            mode = 'adam_only' if view['context'].get('bearing_adam_only') else 'curvature_then_adam'
+            old_mode = last_update.get('mode')
+            if old_mode in ('adam_only', 'curvature_then_adam') and old_mode != mode:
+                return prompt + (f"\nThe numerical update path changed from {old_mode} to {mode} on the "
+                                 "same parent and data. Reusing the previous five functions isolates "
+                                 "the effect of that change. Explain the experiment in your reflection.")
         return prompt + ("\nThe previous experiment was rejected on THIS parent. Read its exact program, "
                          "training settings and measurement in previous_native_state. Repeating the "
                          "same executable settings on this seed will repeat the result. In reflection "
@@ -146,6 +154,28 @@ def previous_decision_prompt(prompt, view, previous, condition):
                      "in previous_measurement_scope. Its candidate measurement applies to that previous "
                      "experiment. Use parent_training_metrics and parent_validation_metrics measured on "
                      "this round's inputs. Test your proposal under the current conditions.")
+
+
+def use_direct_bearing_adam(previous, condition, parent_id, round_index):
+    """Test the immediate previous measured rejection on this exact parent and public projection."""
+    if (not isinstance(previous, dict) or condition['dataset_key'] != 'B'
+            or previous.get('round_index') != round_index - 1 or not parent_id
+            or previous.get('supplied_parent_artifact_id') != parent_id
+            or previous.get('selected_artifact_id') != parent_id
+            or not isinstance(previous.get('condition'), dict)
+            or any(v is None or v == '' or previous['condition'].get(k) != v for k, v in condition.items())):
+        return False
+    experiment = previous.get('bearing_update')
+    if not isinstance(experiment, dict) or experiment.get('mode') != 'curvature_then_adam':
+        return False
+    before, after = experiment.get('parent_errors'), experiment.get('candidate_errors')
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+    for metric in ('rmse', 'short_life_rmse'):
+        values = before.get(metric), after.get(metric)
+        if any(type(v) not in (int, float) or not math.isfinite(v) for v in values) or values[1] <= values[0]:
+            return False
+    return True
 
 
 def train(rnd):
@@ -204,6 +234,12 @@ def train(rnd):
         stage = 'proposal_model'
         prompt = TASK_PROPOSAL_PROMPTS[rnd.dataset_key]
         condition = dict(dataset_key=rnd.dataset_key, stage_id=rnd.stage_id, **hashes)
+        if rnd.dataset_key == 'B' and use_direct_bearing_adam(previous, condition, rnd.parent.artifact_id, rnd.round_index):
+            view['context']['bearing_adam_only'] = True
+            prompt = PROMPT + (" B runs your Adam program directly on the supplied MLP using the inherited "
+                               "optimizer moments. The previous curvature-plus-Adam trial on this same parent "
+                               "and data was rejected after both overall and short-life validation RMSE rose. "
+                               "Test direct Adam on this parent. Compare overall and short-life RMSE in minutes.")
         prompt = previous_decision_prompt(prompt, view, previous, condition)
         old_condition = previous.get('condition') if isinstance(previous, dict) else None
         if (rnd.dataset_key == 'B' and isinstance(old_condition, dict)
@@ -238,6 +274,12 @@ def train(rnd):
         configuration = dict(program_sha256=report['program_sha256'],
                              plan=report['numerical']['plan'],
                              parent_file_sha256=hashes['parent'], proposal_call_id=proposal_receipt.call_id)
+        if rnd.dataset_key == 'B':
+            mode = report['numerical']['bearing_update_mode']
+            configuration['bearing_update_mode'] = mode
+            measured_update = dict(mode=mode,
+                parent_errors={k: report['local_validation_before'][k] for k in ('rmse', 'short_life_rmse')},
+                candidate_errors={k: report['local_validation_after'][k] for k in ('rmse', 'short_life_rmse')})
         seed = model.meta['seed']
         # Keep exact proposal and call receipt alongside the model, separate from protocol stdout.
         write(candidate/'proposal.json', action)
@@ -260,6 +302,8 @@ def train(rnd):
                            local_diagnostics={'scope':'not platform measurements',
                                'before':report['local_validation_before'],
                                'after':report['local_validation_after']})
+        if rnd.dataset_key == 'B':
+            select_view['bearing_update_mode'] = mode
         if rnd.dataset_key == 'B' and matched['experiments']:
             select_view['matched_experiments'] = prompt_history(matched, report)
         if rnd.dataset_key == 'A':
@@ -293,7 +337,8 @@ def train(rnd):
               condition=condition, supplied_parent_artifact_id=rnd.parent.artifact_id, candidate_receipt=submitted,
               selected_artifact_id=chosen['selected_artifact_id'], reason=chosen['reason'],
               proposal=action, selection_receipt={'call_id':choice_receipt.call_id, 'response':choice_receipt.response},
-              model_call_ids=list(rnd.call_ids), history_ids=[item['id'] for item in history]))
+              model_call_ids=list(rnd.call_ids), history_ids=[item['id'] for item in history],
+              **({'bearing_update':measured_update} if rnd.dataset_key=='B' else {})))
         if rnd.dataset_key == 'B':
             append_result(matched, rnd.round_index, proposal['program'], report, chosen['selected_role'], chosen['reason'])
             write(history_file, matched)

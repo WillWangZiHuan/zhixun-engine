@@ -21,7 +21,7 @@ def train(parent,data,source,context,output,steady_dropout=False):
             if groups is not None:
                 groups = np.tile(groups, 5)
     bearing_steps = None
-    if model.meta['profile'] == 'B':
+    if model.meta['profile'] == 'B' and not context.get('bearing_adam_only', False):
         from .bearing_update import continue_bearing
         bearing_steps = continue_bearing(model, x, y, constrain_short_life=context.get('training_projection_changed', False))
     engine_steps = None
@@ -68,6 +68,8 @@ def train(parent,data,source,context,output,steady_dropout=False):
             total+=float(loss)*len(idx);rates.append(float(rate))
         model.meta['epochs']+=1;history.append(dict(epoch=model.meta['epochs'],loss=total/len(x),steps=model.meta['steps'],learning_rate_first=rates[0],learning_rate_last=rates[-1]))
     model.meta['batch_size']=batch;model.meta['learning_rate']=rates[-1];model.validate();model.save(output/'checkpoint.npz');report=dict(complete=True,plan=plan,initial_steps=before_steps,final_steps=model.meta['steps'],initial_epochs=before_epochs,final_epochs=model.meta['epochs'],gradient_check=check,train_rows=len(x),weight_min=float(weights.min()),weight_max=float(weights.max()),wall_seconds=time.monotonic()-started,history=history)
+    if model.meta['profile'] == 'B':
+        report['bearing_update_mode'] = 'curvature_then_adam' if bearing_steps is not None else 'adam_only'
     if bearing_steps is not None:
         report['bearing_curvature_steps'] = bearing_steps
     if gas_steps is not None:
