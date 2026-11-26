@@ -105,6 +105,34 @@ def selection(text, parent_id, candidate_id):
     return dict(selected_role=role, selected_artifact_id=parent_id if role == 'parent' else candidate_id, reason=reason)
 
 
+def previous_decision_prompt(prompt, view, previous, condition):
+    """A retained parent's last experiment is comparable only on the same measured inputs."""
+    if not isinstance(previous, dict):
+        return prompt
+    previous_parent = previous.get('supplied_parent_artifact_id')
+    if not previous_parent or previous.get('selected_artifact_id') != previous_parent:
+        return prompt
+    old = previous.get('condition') or {'dataset_key': previous.get('dataset_key')}
+    changed = [key for key, value in condition.items() if old.get(key) and value and old[key] != value]
+    unknown = [key for key, value in condition.items() if not old.get(key) or not value]
+    if previous_parent != view['parent_artifact_id']:
+        changed.append('parent_artifact_id')
+    if not changed and not unknown:
+        return prompt + ("\nThe previous experiment was rejected on THIS parent. Read its exact program, "
+                         "training settings and measurement in previous_native_state. Repeating the "
+                         "same executable settings on this seed will repeat the result. In reflection "
+                         "name that experiment and identify a materially different change; implement it.")
+    view['previous_measurement_scope'] = dict(
+        previous_round=previous.get('round_index'), previous_condition=old, current_condition=condition,
+        changed_fields=changed, unverified_fields=unknown,
+        previous_parent_artifact_id=previous_parent,
+        current_parent_artifact_id=view['parent_artifact_id'])
+    return prompt + ("\nThe previous decision retained the supplied parent under the conditions recorded "
+                     "in previous_measurement_scope. Its candidate measurement applies to that previous "
+                     "experiment. Use parent_training_metrics and parent_validation_metrics measured on "
+                     "this round's inputs. Test your proposal under the current conditions.")
+
+
 def train(rnd):
     stage = 'input'
     root = None
@@ -160,13 +188,8 @@ def train(rnd):
             view['reference_experiment'] = 'Test this parent-only starting program; explain the hypothesis and falsifier. Use the observed measurements to guide the next proposal.'
         stage = 'proposal_model'
         prompt = TASK_PROPOSAL_PROMPTS[rnd.dataset_key]
-        if (isinstance(previous, dict)
-                and previous.get('supplied_parent_artifact_id') == rnd.parent.artifact_id
-                and previous.get('selected_artifact_id') == rnd.parent.artifact_id):
-            prompt += ("\nThe previous experiment was rejected on THIS parent. Read its exact program, "
-                       "training settings and measurement in previous_native_state. Repeating the "
-                       "same executable settings on this seed will repeat the result. In reflection "
-                       "name that experiment and identify a materially different change; implement it.")
+        condition = dict(dataset_key=rnd.dataset_key, stage_id=rnd.stage_id, **hashes)
+        prompt = previous_decision_prompt(prompt, view, previous, condition)
         def experiment(folder, text):
             try:
                 action = parse(text)
@@ -242,7 +265,7 @@ def train(rnd):
         choice_receipt, chosen = decision(rnd, root, 'selection', selection_prompt, select_view, choose)
         stage = 'state_save'
         write(state/'last-round.json', dict(dataset_key=rnd.dataset_key, round_index=rnd.round_index,
-              supplied_parent_artifact_id=rnd.parent.artifact_id, candidate_receipt=submitted,
+              condition=condition, supplied_parent_artifact_id=rnd.parent.artifact_id, candidate_receipt=submitted,
               selected_artifact_id=chosen['selected_artifact_id'], reason=chosen['reason'],
               proposal=action, selection_receipt={'call_id':choice_receipt.call_id, 'response':choice_receipt.response},
               model_call_ids=list(rnd.call_ids), history_ids=[item['id'] for item in history]))
