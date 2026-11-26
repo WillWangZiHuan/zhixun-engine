@@ -77,9 +77,9 @@ def train(parent,data,source,context,output,steady_dropout=False):
     (output/'training.json').write_text(json.dumps(report,indent=2)+'\n');return report
 
 def main():
-    case=Path(sys.argv[1]);request=json.loads((case/'job.json').read_text());allowed=sorted(os.sched_getaffinity(0))[:4] if hasattr(os,'sched_getaffinity') else None
+    case=Path(sys.argv[1]);request=json.loads((case/'job.json').read_text());allowed=sorted(os.sched_getaffinity(0))[:2] if hasattr(os,'sched_getaffinity') else None
     if allowed is not None:os.sched_setaffinity(0,set(allowed))
-    seconds=int(request['cpu_seconds']);resource.setrlimit(resource.RLIMIT_CPU,(seconds,seconds+1));resource.setrlimit(resource.RLIMIT_AS,(8000000000,8000000000));resource.setrlimit(resource.RLIMIT_FSIZE,(100000000,100000000));start=time.monotonic()
+    seconds=int(request['cpu_seconds']);resource.setrlimit(resource.RLIMIT_CPU,(seconds,seconds+1));resource.setrlimit(resource.RLIMIT_FSIZE,(100000000,100000000));start=time.monotonic()
     try:
         report=train(case/'parent.npz',case/'train.npz',(case/'program.py').read_text(),request['context'],case/'result');status='completed';error=None
     except Exception as e:status='failed';error={'type':type(e).__name__,'message':str(e)[:1000]}

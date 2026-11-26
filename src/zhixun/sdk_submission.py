@@ -6,6 +6,7 @@ import math
 import os
 import re
 import sys
+import time
 from contest_harness.errors import HarnessError
 from baselines.data import json_value
 from baselines.predict import predict as model_predict
@@ -38,7 +39,7 @@ def call_model(rnd, root, name, prompt, view, feedback):
     folder = root/name
     folder.mkdir()
     messages = [{'role':'system', 'content':prompt},
-                {'role':'user', 'content':json.dumps(view, ensure_ascii=False, allow_nan=False)}]
+                {'role':'user', 'content':json.dumps(view, ensure_ascii=False, allow_nan=False, separators=(',', ':'))}]
     if feedback is not None:
         diagnostic = {k: v for k, v in feedback.items() if k != 'previous_reply'}
         action = 'Revise the failed decision using the execution error. Return one complete corrected JSON decision.'
@@ -56,8 +57,10 @@ def call_model(rnd, root, name, prompt, view, feedback):
                           host_max_output_tokens=rnd.max_output_tokens, max_tokens=max_tokens,
                           enable_thinking=False)),
           file=sys.stderr, flush=True)
+    started = time.monotonic()
     receipt = rnd.model(messages, temperature=0, max_tokens=max_tokens, enable_thinking=False)
-    write(folder/'receipt.json', dict(call_id=receipt.call_id, response=receipt.response))
+    write(folder/'receipt.json', dict(call_id=receipt.call_id, response=receipt.response,
+                                     gateway_wall_seconds=time.monotonic()-started))
     return receipt
 
 
@@ -124,10 +127,23 @@ def train(rnd):
         stage = 'state_read'
         state = rnd.state_workspace(root/'state')
         previous = json_value((state/'last-round.json').read_text()) if (state/'last-round.json').exists() else None
+        # The full SDK history stays in the audit record. Both decisions see every
+        # round's measured result, while only the latest experiment needs its code.
+        trend = []
+        for item in history:
+            point = {k: item[k] for k in ('id', 'round_index', 'stage_id', 'selected_artifact_id',
+                     'validation_metrics', 'hypothesis') if k in item}
+            plan = (item.get('configuration') or {}).get('plan')
+            if plan is not None:
+                point['plan'] = plan
+            trend.append(point)
+        previous_experiment = ({k: previous[k] for k in ('proposal', 'reason', 'selected_artifact_id',
+                               'candidate_receipt', 'supplied_parent_artifact_id') if k in previous}
+                               if previous else None)
         view.update(round_index=rnd.round_index, actual_parent_file_sha256=hashes['parent'],
                     parent_checkpoint_receipt=rnd.parent.checkpoint_sha256,
                     parent_artifact_id=rnd.parent.artifact_id, task_contract=rnd.task,
-                    actual_platform_history=history, previous_native_state=previous,
+                    actual_platform_history=trend, previous_native_state=previous_experiment,
                     required_next='experiment')
         if not history:
             from .round_prompt import START_PROGRAMS
@@ -183,7 +199,9 @@ def train(rnd):
         allowed = [rnd.parent.artifact_id, submitted['artifact_id']]
         select_view = dict(allowed_artifact_ids=allowed, allowed_roles=['parent', 'candidate'], parent_artifact=rnd.parent.receipt,
                            candidate_receipt=submitted, task_contract=rnd.task,
-                           actual_platform_history=history, proposal=action,
+                           actual_platform_history=trend, proposal={k: proposal[k] for k in
+                               ('hypothesis', 'expected_result', 'falsifier') if k in proposal},
+                           executed_plan=report['numerical']['plan'],
                            local_diagnostics={'scope':'not platform measurements',
                                'before':report['local_validation_before'],
                                'after':report['local_validation_after']})
@@ -237,15 +255,8 @@ def train(rnd):
 
 
 @lru_cache(maxsize=1)
-def prediction_model(path):
-    return Model.load(Path(path))
-
-
-def predict(sample, model_dir):
-    # Host declares an exact selected checkpoint; never search /app or choose our latest candidate.
-    raw = os.environ.get('CONTEST_ARTIFACT_PATH')
-    if not raw:
-        raise HarnessError('ARTIFACT_PATH_REQUIRED')
+def prediction_model(raw, model_dir):
+    # The official prediction process owns one immutable artifact mount.
     path, directory = Path(raw), Path(model_dir)
     if not path.resolve().is_relative_to(directory.resolve()):
         raise HarnessError('ARTIFACT_OUTSIDE_MODEL_MOUNT')
@@ -254,7 +265,14 @@ def predict(sample, model_dir):
         if current.is_symlink():
             raise HarnessError('ARTIFACT_SYMLINK')
         current = current.parent
-    model = prediction_model(str(path.resolve()))
+    return Model.load(path)
+
+
+def predict(sample, model_dir):
+    raw = os.environ.get('CONTEST_ARTIFACT_PATH')
+    if not raw:
+        raise HarnessError('ARTIFACT_PATH_REQUIRED')
+    model = prediction_model(raw, model_dir)
     if model.meta['task'] != sample.task or (sample.dataset_key is not None and model.meta['profile'] != sample.dataset_key):
         raise HarnessError('PREDICTION_TASK_MISMATCH')
     result = model_predict(model, sample.inputs)

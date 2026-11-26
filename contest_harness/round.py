@@ -4,6 +4,7 @@ import hashlib
 import json
 import shutil
 import stat
+import sys
 import threading
 from pathlib import Path, PurePosixPath
 
@@ -22,6 +23,13 @@ _CONFIG_LIMIT = 65536
 _FILE_LIMIT = 64
 _BYTE_LIMIT = 512 * 1024 * 1024
 _CHUNK = 1024 * 1024
+
+
+def _log_round_event(message):
+    try:
+        print(f"[contest_harness] {message}", file=sys.stderr, flush=True)
+    except OSError:
+        pass
 
 
 def _text(value, limit=_TEXT_LIMIT):
@@ -398,10 +406,12 @@ class Round:
                 "model_call_ids": cited_calls,
                 "seed": seed,
             }}, self._writer)
+            _log_round_event("round_complete sent")
             ack = read_frame(self._reader)
             if ack.get("type") != "round_ack" or ack.get("accepted") is not True:
                 raise HarnessError("ROUND_ACK_MISSING")
             self._finished = True
+            _log_round_event("round_ack received")
         return ack
 
     def _rpc(self, request_type, expect, **fields):
@@ -414,10 +424,14 @@ class Round:
             identifier = self._sequence
             self._sequence += 1
             emit({"type": request_type, "id": identifier, **fields}, self._writer)
+            if request_type == "state_request":
+                _log_round_event("state_request sent")
             reply = read_frame(self._reader)
             if reply.get("id") != identifier or reply.get("type") != expect:
                 raise HarnessError("RPC_MISMATCH", expect)
             self._outcome_unknown = False
+            if request_type == "state_request":
+                _log_round_event("state_response received")
             return reply
 
 

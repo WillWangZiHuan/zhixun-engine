@@ -27,16 +27,22 @@ def continue_gas(model, inputs, targets):
     weights = 0.5 / np.asarray(counts)[labels]
     design = np.column_stack((features[:, steady], np.ones(len(features))))
     gram = design.T @ (weights[:, None] * design)
-    gram.flat[::len(gram)+1] += 1e-4
+    # Suppress poorly supported directions shared by correlated sensors.
+    gram.flat[::len(gram)+1] += 3e-4
     condition = np.linalg.solve(gram, np.eye(len(gram)))
     anchors = x[~paired]
     anchor_design = np.column_stack((anchors[:, steady], np.ones(len(anchors))))
     original_logits = model.forward(anchors)[1]
-    for _ in range(96):
+    for _ in range(192):
         hidden, output = model.forward(features)
         logits = output[:, pair]
         probabilities = np.exp(logits - logits.max(axis=1, keepdims=True))
         probabilities /= probabilities.sum(axis=1, keepdims=True)
+        log_loss = -np.log(np.maximum(probabilities[np.arange(len(labels)), labels], 1e-300))
+        worst_loss = max(float(log_loss[labels == c].mean()) for c in (0, 1))
+        # Recheck the actual stage's training rows before strengthening a learned boundary.
+        if worst_loss <= 0.02:
+            break
         probabilities[np.arange(len(labels)), labels] -= 1.0
         delta = probabilities * weights[:, None]
         hidden_delta = (delta @ model.params['w2'][:, pair].T) * (1.0-hidden**2)
@@ -51,5 +57,5 @@ def continue_gas(model, inputs, targets):
         model.params['b2'] -= 0.15 * anchor_delta.sum(axis=0)
         model.params['w2'][:, pair] -= 0.15 * (hidden.T @ delta)
         model.params['b2'][pair] -= 0.15 * delta.sum(axis=0)
-    report['updates'] = 96
+        report['updates'] += 1
     return report

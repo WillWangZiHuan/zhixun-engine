@@ -30,6 +30,11 @@ def metrics(model, data):
         return evaluate(model, data)
     error = model.predict(data['x']) - data['y']
     scores = dict(rmse=float(np.sqrt(np.mean(error**2))), mae=float(np.mean(abs(error))))
+    if model.meta['profile'] == 'B':
+        cutoff = float(np.quantile(data['y'], 0.25))
+        short = data['y'] <= cutoff
+        scores.update(short_life_rmse=float(np.sqrt(np.mean(error[short]**2))),
+                      short_life_rows=int(short.sum()), short_life_cutoff_minutes=cutoff)
     if model.meta['profile'] == 'C':
         # log(1 + mean NASA penalty), in original cycles. Subtract the maximum
         # before exponentiating so one large error cannot overflow this diagnostic.
@@ -63,7 +68,9 @@ def prepare(parent, train_path, validation_path, profile, task):
                 baseline_program=default_program(task, {'A':32, 'B':64, 'C':256}[profile]),
                 numerical_functions=NUMERICAL_FUNCTIONS, device_groups=None,
                 data_contract='id/inputs/answer only; meta excluded from learning and prediction')
-    return model, train, valid, inputs, {k:digest(p) for k,p in inputs.items()}, view
+    hashes = dict(parent=digest(parent), train=train['sha256'].removeprefix('sha256:'),
+                  validation=valid['sha256'].removeprefix('sha256:'))
+    return model, train, valid, inputs, hashes, view
 
 
 def continue_candidate(root, prepared, proposal):
@@ -75,7 +82,7 @@ def continue_candidate(root, prepared, proposal):
     case = root/'work'
     case.mkdir()
     shutil.copyfile(inputs['parent'], case/'parent.npz')
-    np.savez_compressed(case/'train.npz', x=train['x'], y=train['y'])
+    np.savez(case/'train.npz', x=train['x'], y=train['y'])
     write(case/'job.json', dict(proposal=proposal, parent_kind='core',
                                context=view['context'], cpu_seconds=20))
     supervision = supervise(case, 'zhixun.experiment_agent.task_worker')
@@ -109,7 +116,9 @@ def continue_candidate(root, prepared, proposal):
     shutil.copyfile(source, target/'checkpoint.npz')
     np.testing.assert_array_equal(candidate.predict(valid['x']),
                                   Model.load(target/'checkpoint.npz').predict(valid['x']))
-    report = dict(execution['training'], parent_file_sha256=hashes['parent'],
+    report = dict(execution['training'], worker_resources={k: execution[k] for k in
+                  ('cpu_seconds', 'wall_seconds', 'max_rss_kib', 'cpu_affinity') if k in execution},
+                  parent_file_sha256=hashes['parent'],
                   checkpoint_sha256=digest(target/'checkpoint.npz'), model_kind='core',
                   source_input_hashes=hashes, local_validation_before=view['parent_validation_metrics'],
                   local_validation_after=metrics(candidate, valid), device_metadata_used=False,

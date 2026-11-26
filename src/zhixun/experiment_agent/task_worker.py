@@ -32,10 +32,13 @@ def train(case):
 
 
 def main():
-    case=Path(sys.argv[1]);job=json.loads((case/'job.json').read_text());allowed=sorted(os.sched_getaffinity(0))[:4] if hasattr(os,'sched_getaffinity') else None
+    case=Path(sys.argv[1]);job=json.loads((case/'job.json').read_text());allowed=sorted(os.sched_getaffinity(0))[:2] if hasattr(os,'sched_getaffinity') else None
     if allowed is not None:os.sched_setaffinity(0,set(allowed))
     seconds=int(job['cpu_seconds']);resource.setrlimit(resource.RLIMIT_CPU,(seconds,seconds+1));
-    if sys.platform=='linux':resource.setrlimit(resource.RLIMIT_AS,(8000000000,8000000000))
+    if sys.platform == 'linux':
+        soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+        budget = min([4 * 1024**3] + [v for v in (soft, hard) if v != resource.RLIM_INFINITY])
+        resource.setrlimit(resource.RLIMIT_AS, (budget, budget))
     resource.setrlimit(resource.RLIMIT_FSIZE,(100000000,100000000));started=time.monotonic()
     try:report=train(case);status='completed';error=None
     except Exception as e:status='failed';error=dict(type=type(e).__name__,message=str(e)[:1000]);report=None

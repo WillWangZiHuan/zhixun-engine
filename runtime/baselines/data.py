@@ -2,6 +2,7 @@
 import hashlib
 import json
 import math
+from functools import lru_cache
 from pathlib import Path
 import re
 
@@ -30,6 +31,11 @@ def json_value(raw):
     return json.loads(raw, object_pairs_hook=unique_object, parse_constant=reject)
 
 
+@lru_cache(maxsize=4096)
+def encoded_path(path):
+    return json.dumps(path, ensure_ascii=False, separators=(",", ":"))
+
+
 def flatten(inputs):
     paths, values = [], []
     def visit(value, path, depth):
@@ -39,16 +45,16 @@ def flatten(inputs):
             for key in sorted(value):
                 if not isinstance(key, str) or re.sub(r"[^a-z0-9]", "", key.lower()) in FORBIDDEN_INPUTS:
                     raise ValueError("target-derived input field is not allowed")
-                visit(value[key], path + [("key", key)], depth + 1)
+                visit(value[key], path + (("key", key),), depth + 1)
         elif isinstance(value, list):
             for index, child in enumerate(value):
-                visit(child, path + [("index", index)], depth + 1)
+                visit(child, path + (("index", index),), depth + 1)
         elif isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
-            paths.append(json.dumps(path, ensure_ascii=False, separators=(",", ":")))
+            paths.append(encoded_path(path))
             values.append(float(value))
         else:
             raise ValueError("model inputs must contain finite numeric features only")
-    visit(inputs, [], 0)
+    visit(inputs, (), 0)
     if not values or len(values) > 4096:
         raise ValueError("expected 1..4096 numeric features")
     return paths, values
