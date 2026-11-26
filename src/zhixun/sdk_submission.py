@@ -106,13 +106,28 @@ def selection(text, parent_id, candidate_id):
 
 
 def previous_decision_prompt(prompt, view, previous, condition):
-    """A retained parent's last experiment is comparable only on the same measured inputs."""
+    """Describe the last experiment in the data projection where it was measured."""
     if not isinstance(previous, dict):
         return prompt
     previous_parent = previous.get('supplied_parent_artifact_id')
-    if not previous_parent or previous.get('selected_artifact_id') != previous_parent:
+    if not previous_parent:
         return prompt
     old = previous.get('condition') or {'dataset_key': previous.get('dataset_key')}
+    if previous.get('selected_artifact_id') != previous_parent:
+        stage_inputs = ('stage_id', 'train', 'validation')
+        if condition['dataset_key'] == 'B' and any(
+            old.get(key) and condition.get(key) and old[key] != condition[key] for key in stage_inputs
+        ):
+            train = view['parent_training_metrics']
+            valid = view['parent_validation_metrics']
+            return prompt + (
+                f"\nThis round uses a new data projection. On these inputs the supplied parent has "
+                f"training RMSE {train['rmse']:.3f}, validation RMSE {valid['rmse']:.3f}, and "
+                f"validation short-life RMSE {valid['short_life_rmse']:.3f} minutes. "
+                "Use these current values to diagnose the parent. The measurements in the previous "
+                "round's receipt and history refer to that round's data."
+            )
+        return prompt
     changed = [key for key, value in condition.items() if old.get(key) and value and old[key] != value]
     unknown = [key for key, value in condition.items() if not old.get(key) or not value]
     if previous_parent != view['parent_artifact_id']:
@@ -190,6 +205,16 @@ def train(rnd):
         prompt = TASK_PROPOSAL_PROMPTS[rnd.dataset_key]
         condition = dict(dataset_key=rnd.dataset_key, stage_id=rnd.stage_id, **hashes)
         prompt = previous_decision_prompt(prompt, view, previous, condition)
+        old_condition = previous.get('condition') if isinstance(previous, dict) else None
+        if (rnd.dataset_key == 'B' and isinstance(old_condition, dict)
+                and old_condition.get('dataset_key') == 'B' and old_condition.get('train')
+                and old_condition['train'] != hashes['train']):
+            view['context']['training_projection_changed'] = True
+            prompt += ("\nThis training projection changed. Before your Adam program, each accepted "
+                       "Gauss-Newton step must lower the weighted residual loss and the mean squared "
+                       "residuals both across the current training set and in its lowest remaining-life "
+                       "quartile. The worker can take fewer than six steps. Check the resulting model "
+                       "on the current validation data when it is measured.")
         def experiment(folder, text):
             try:
                 action = parse(text)

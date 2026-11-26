@@ -23,7 +23,7 @@ def train(parent,data,source,context,output,steady_dropout=False):
     bearing_steps = None
     if model.meta['profile'] == 'B':
         from .bearing_update import continue_bearing
-        bearing_steps = continue_bearing(model, x, y)
+        bearing_steps = continue_bearing(model, x, y, constrain_short_life=context.get('training_projection_changed', False))
     engine_steps = None
     if model.meta['profile'] == 'C':
         from .engine_update import continue_engine

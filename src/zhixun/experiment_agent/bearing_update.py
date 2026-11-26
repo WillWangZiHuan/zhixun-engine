@@ -2,7 +2,7 @@
 import numpy as np
 
 
-def continue_bearing(model, inputs, targets):
+def continue_bearing(model, inputs, targets, *, constrain_short_life=False):
     # Bound the largest matrix by training rows; feature and parameter dimensions
     # come from the official parent. Sampling only applies to a larger training stage.
     if len(targets) > 8192:
@@ -12,6 +12,7 @@ def continue_bearing(model, inputs, targets):
     x = model.normalized(inputs)
     y = (targets - model.meta['target_mean']) / model.meta['target_scale']
     lifetime_weights = np.clip(np.exp(np.clip(y, -12.0, 12.0)), 0.2, 8.0)
+    short = y <= np.quantile(y, .25) if constrain_short_life else None
     trace = []
     for _ in range(6):
         hidden, prediction = model.forward(x)
@@ -31,6 +32,9 @@ def continue_bearing(model, inputs, targets):
         names = ('w2', 'b2', 'w1', 'b1')
         previous = {name: model.params[name].copy() for name in names}
         before = float(weights @ (error**2))
+        if constrain_short_life:
+            before_all = float(np.mean(error**2))
+            before_short = float(np.mean(error[short]**2))
         for power in range(9):
             rate = 0.5**power
             offset = 0
@@ -42,10 +46,21 @@ def continue_bearing(model, inputs, targets):
             residual = model.forward(x)[1][:, 0] - y
             after = float(weights @ (residual**2))
             if after < before:
-                trace.append(dict(step_size=rate, training_loss_before=before, training_loss_after=after))
+                step = dict(step_size=rate, training_loss_before=before, training_loss_after=after)
+                if constrain_short_life:
+                    after_all = float(np.mean(residual**2))
+                    after_short = float(np.mean(residual[short]**2))
+                    if after_all >= before_all or after_short >= before_short:
+                        continue
+                    step.update(all_mse_before=before_all, all_mse_after=after_all,
+                                short_mse_before=before_short, short_mse_after=after_short)
+                trace.append(step)
                 break
         else:
             for name in names:
                 model.params[name][:] = previous[name]
             break
-    return dict(rows=len(y), damping=1e-5, accepted_steps=trace)
+    report = dict(rows=len(y), damping=1e-5, accepted_steps=trace)
+    if constrain_short_life:
+        report['short_life_train_rows'] = int(short.sum())
+    return report
