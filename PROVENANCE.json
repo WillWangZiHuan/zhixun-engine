@@ -1,0 +1,8 @@
+{
+  "base_image_archive_sha256": "9d16878311c88261e7512207af9b25b55266881891275e3c60bc931446f13eaa",
+  "v4_source_commit": "48add28e6ca62283c16729019daebb50ea2e5373",
+  "sdk_version": "1.0.5",
+  "sdk_url": "https://rsi-index.115.zone/downloads/contest-harness-sdk-1.0.5.tar.gz",
+  "sdk_sha256": "bb5c616081de975d8f932a20cc00fd489e701e7585b69fdb52982bd669a305e6",
+  "parent_submission_commit": "9849adf6cbbeea521f092cd7a00a77ccbdcf275e"
+}
