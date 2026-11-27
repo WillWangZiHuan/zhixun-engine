@@ -171,11 +171,9 @@ def use_direct_bearing_adam(previous, condition, parent_id, round_index):
     before, after = experiment.get('parent_errors'), experiment.get('candidate_errors')
     if not isinstance(before, dict) or not isinstance(after, dict):
         return False
-    for metric in ('rmse', 'short_life_rmse'):
-        values = before.get(metric), after.get(metric)
-        if any(type(v) not in (int, float) or not math.isfinite(v) for v in values) or values[1] <= values[0]:
-            return False
-    return True
+    errors = before.get('rmse'), after.get('rmse')
+    return (all(type(v) in (int, float) and math.isfinite(v) for v in errors)
+            and errors[1] > errors[0])
 
 
 def train(rnd):
@@ -234,11 +232,30 @@ def train(rnd):
         stage = 'proposal_model'
         prompt = TASK_PROPOSAL_PROMPTS[rnd.dataset_key]
         condition = dict(dataset_key=rnd.dataset_key, stage_id=rnd.stage_id, **hashes)
+        history_inputs = []
+        if rnd.dataset_key == 'C':
+            from .experiment_agent.engine_history import follows_history_conflict, previous_training_inputs
+            if (view['operating_settings']['update'] != 'proposal_adam' and previous
+                    and previous.get('dataset_key') == 'C' and previous.get('round_index') == rnd.round_index - 1
+                    and previous.get('condition', {}).get('train') == hashes['train']
+                    and {p.stem for p in (state/'engine-training').glob('*.npz')} == {hashes['train']}):
+                view['context']['protect_prediction_extremes'] = True
+                prompt += (" The initial broad training projection repeats. Before your Adam update, the "
+                           "auxiliary fit limits further outward movement at the upper and lower deciles "
+                           "of the supplied parent's training predictions. Measure RMSE and NASA jointly.")
+            if (view['operating_settings']['update'] != 'proposal_adam'
+                    and follows_history_conflict(previous, hashes['train'], hashes['parent'], rnd.round_index)):
+                history_inputs = previous_training_inputs(state, hashes['train'])
+            if history_inputs:
+                view['historical_parent_prediction_rows'] = [len(rows) for rows in history_inputs]
+                prompt += (" The previous candidate improved the current tradeoff but lost historical accuracy. "
+                           "This fit preserves the supplied parent's predictions on separate samples from earlier "
+                           "training projections before running your Adam program.")
         if rnd.dataset_key == 'B' and use_direct_bearing_adam(previous, condition, rnd.parent.artifact_id, rnd.round_index):
             view['context']['bearing_adam_only'] = True
             prompt = PROMPT + (" B runs your Adam program directly on the supplied MLP using the inherited "
                                "optimizer moments. The previous curvature-plus-Adam trial on this same parent "
-                               "and data was rejected after both overall and short-life validation RMSE rose. "
+                               "and data was rejected after overall validation RMSE rose. "
                                "Test direct Adam on this parent. Compare overall and short-life RMSE in minutes.")
         prompt = previous_decision_prompt(prompt, view, previous, condition)
         old_condition = previous.get('condition') if isinstance(previous, dict) else None
@@ -262,7 +279,7 @@ def train(rnd):
             except (TypeError, ValueError, RecursionError) as exc:
                 raise RejectedProposal(str(exc)) from exc
             write(folder/'action.json', action)
-            candidate, report = continue_candidate(folder, prepared, action['proposal'])
+            candidate, report = continue_candidate(folder, prepared, action['proposal'], history_inputs)
             return action, candidate, report
 
         proposal_receipt, (action, candidate, report) = decision(
@@ -326,7 +343,7 @@ def train(rnd):
             train_data = prepared[1]
             comparison = compare_seen_training(
                 state, hashes['train'], train_data['x'], train_data['y'], model,
-                Model.load(candidate/'checkpoint.npz'))
+                Model.load(candidate/'checkpoint.npz'), round_index=rnd.round_index)
             select_view['seen_training_comparison'] = comparison
             if comparison['projections'] > 1:
                 select_view['retention_test']['seen_training_mse_no_higher'] = comparison['passes']
@@ -348,12 +365,18 @@ def train(rnd):
         selection_prompt = SELECT_PROMPT + '\n' + TASK_SELECTION_HINTS[rnd.dataset_key]
         choice_receipt, chosen = decision(rnd, root, 'selection', selection_prompt, select_view, choose)
         stage = 'state_save'
+        engine_state = {}
+        if rnd.dataset_key == 'C':
+            current = [after[k] - before[k] for k in ('rmse', tail)]
+            engine_state['engine_history_conflict'] = (
+                chosen['selected_role'] == 'parent' and max(current) <= 0 and min(current) < 0
+                and not comparison['passes'])
         write(state/'last-round.json', dict(dataset_key=rnd.dataset_key, round_index=rnd.round_index,
               condition=condition, supplied_parent_artifact_id=rnd.parent.artifact_id, candidate_receipt=submitted,
               selected_artifact_id=chosen['selected_artifact_id'], reason=chosen['reason'],
               proposal=action, selection_receipt={'call_id':choice_receipt.call_id, 'response':choice_receipt.response},
               model_call_ids=list(rnd.call_ids), history_ids=[item['id'] for item in history],
-              **({'bearing_update':measured_update} if rnd.dataset_key=='B' else {})))
+              **engine_state, **({'bearing_update':measured_update} if rnd.dataset_key=='B' else {})))
         if rnd.dataset_key == 'B':
             append_result(matched, rnd.round_index, proposal['program'], report, chosen['selected_role'], chosen['reason'])
             write(history_file, matched)

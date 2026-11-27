@@ -27,7 +27,11 @@ def train(parent,data,source,context,output,steady_dropout=False):
     engine_steps = None
     if model.meta['profile'] == 'C':
         from .engine_update import continue_engine
-        engine_steps = continue_engine(model, x, y)
+        with np.load(data, allow_pickle=False) as saved:
+            history_keys = [name for name in saved.files if name.startswith('history_x_')]
+            old_inputs = [saved[f'history_x_{i}'] for i in range(len(history_keys))]
+        engine_steps = continue_engine(model, x, y, old_inputs,
+                                      protect_extremes=context.get('protect_prediction_extremes', False))
     x=model.normalized(x)
     if task=='regression':y=(y-model.meta['target_mean'])/model.meta['target_scale']
     elif y.dtype.kind not in 'iu' or np.any(y<0) or np.any(y>=len(model.meta['classes'])):raise ValueError('invalid class labels')

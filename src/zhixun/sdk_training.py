@@ -68,12 +68,15 @@ def prepare(parent, train_path, validation_path, profile, task):
                 baseline_program=default_program(task, {'A':32, 'B':64, 'C':256}[profile]),
                 numerical_functions=NUMERICAL_FUNCTIONS, device_groups=None,
                 data_contract='id/inputs/answer only; meta excluded from learning and prediction')
+    if profile == 'C':
+        from .experiment_agent.engine_update import operating_settings
+        view['operating_settings'] = operating_settings(model, train['x'])
     hashes = dict(parent=digest(parent), train=train['sha256'].removeprefix('sha256:'),
                   validation=valid['sha256'].removeprefix('sha256:'))
     return model, train, valid, inputs, hashes, view
 
 
-def continue_candidate(root, prepared, proposal):
+def continue_candidate(root, prepared, proposal, history_inputs=()):
     model, train, valid, inputs, hashes, view = prepared
     try:
         _validate_proposal(proposal, model.meta['profile'])
@@ -82,7 +85,8 @@ def continue_candidate(root, prepared, proposal):
     case = root/'work'
     case.mkdir()
     shutil.copyfile(inputs['parent'], case/'parent.npz')
-    np.savez(case/'train.npz', x=train['x'], y=train['y'])
+    old = {f'history_x_{i}': rows for i, rows in enumerate(history_inputs)}
+    np.savez(case/'train.npz', x=train['x'], y=train['y'], **old)
     write(case/'job.json', dict(proposal=proposal, parent_kind='core',
                                context=view['context'], cpu_seconds=20))
     supervision = supervise(case, 'zhixun.experiment_agent.task_worker')

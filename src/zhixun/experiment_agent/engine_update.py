@@ -81,7 +81,10 @@ def _limited_memory_minimize(objective, initial, max_iterations):
     return point, first_loss, loss, performed
 
 
-def _fit_engine(model, inputs, targets):
+def _fit_engine(model, inputs, targets, old_inputs, protect_extremes):
+    if protect_extremes:
+        parent_output = model.predict(inputs)
+    parent_predictions = [model.predict(rows) for rows in old_inputs]
     report = _condition_inputs(model, inputs, targets)
     rng = np.random.default_rng([model.meta['seed'], model.meta['steps']])
     chosen = rng.choice(len(targets), min(len(targets), 32768), replace=False)
@@ -91,12 +94,22 @@ def _fit_engine(model, inputs, targets):
     scales = np.sqrt(np.maximum(eigenvalues, 1e-7))
     transform = rotation / scales
     design = x @ transform
+    if protect_extremes:
+        target_scale = model.meta['target_scale']
+        anchor = (parent_output[chosen] - model.meta['target_mean']) / target_scale
+        lower, upper = np.quantile(anchor, [.1, .9])
+        tails = [(anchor >= upper, 1, 10), (anchor <= lower, -1, 13)]
     width = model.meta['hidden']
     end = x.shape[1] * width
     original = model.params
     reference = model.forward(x)[1][:, 0]
     initial = np.concatenate(((scales[:, None] * (rotation.T @ original['w1'])).ravel(),
                               original['b1'], original['w2'][:, 0], original['b2']))
+    if old_inputs:
+        old_design = np.vstack([model.normalized(rows) @ transform for rows in old_inputs])
+        old_targets = (np.concatenate(parent_predictions) - model.meta['target_mean']) / model.meta['target_scale']
+        weights = np.concatenate([np.full(len(rows), 1.0 / len(rows)) for rows in old_inputs])
+        group_weight = 1.0 + weights.sum()
 
     def loss_gradient(parameters):
         hidden = np.tanh(design @ parameters[:end].reshape(-1, width) + parameters[end:end + width])
@@ -108,9 +121,24 @@ def _fit_engine(model, inputs, targets):
         square = deviation * deviation
         objective = np.mean(residual**2 + 3.0 * square**2)
         derivative = (2.0 * residual + 12.0 * square * deviation) / len(y)
+        if protect_extremes:
+            for mask, sign, cycles in tails:
+                scale = target_scale / cycles
+                drift = np.maximum(sign * (prediction[mask] - anchor[mask]), 0)
+                objective += .5 * scale**2 * np.mean(drift**2)
+                derivative[mask] += sign * scale**2 * drift / mask.sum()
         back = (1.0 - hidden**2) * readout * derivative[:, None]
         gradient = np.concatenate(((design.T @ back).ravel(), back.sum(axis=0),
                                    hidden.T @ derivative, [derivative.sum()]))
+        if old_inputs:
+            old_hidden = np.tanh(old_design @ parameters[:end].reshape(-1, width) + parameters[end:end + width])
+            delta = old_hidden @ readout + parameters[-1] - old_targets
+            objective = (objective + weights @ (delta ** 2)) / group_weight
+            slope = 2 * weights * delta
+            back_old = (1 - old_hidden ** 2) * readout * slope[:, None]
+            grad_old = np.concatenate(((old_design.T @ back_old).ravel(), back_old.sum(axis=0),
+                                       old_hidden.T @ slope, [slope.sum()]))
+            gradient = (gradient + grad_old) / group_weight
         return float(objective), gradient
 
     fitted, before, after, iterations = _limited_memory_minimize(loss_gradient, initial, 128)
@@ -123,23 +151,19 @@ def _fit_engine(model, inputs, targets):
                                     quartic_penalty=3.0, eigenvalue_floor=1e-7)
     return report
 
-def continue_engine(model, inputs, targets):
+def operating_settings(model, inputs):
     settings = [i for i, path in enumerate(model.meta["paths"])
                 if json.loads(path)[0] == ["key", "settings"]]
     spread = inputs[:, settings].std(axis=0) / model.scale[settings]
     narrow = len(settings) == 3 and bool(max(spread) < 0.1)
-    if narrow:
-        before = np.vstack((model.params["w1"], model.params["b1"])).copy()
-    result = _fit_engine(model, inputs, targets)
-    if narrow:
-        x = model.normalized(inputs)
-        design = np.column_stack((x, np.ones(len(x))))
-        values, vectors = np.linalg.eigh(design.T @ design / len(x))
-        gains = np.maximum(values, 0) / (np.maximum(values, 0) + 0.01)
-        after = np.vstack((model.params["w1"], model.params["b1"]))
-        retained = before + vectors @ (gains[:, None] * (vectors.T @ (after - before)))
-        model.params["w1"][:] = retained[:-1]
-        model.params["b1"][:] = retained[-1]
-    result["operating_settings"] = dict(normalized_std=spread.tolist(),
-                                        first_layer_projection=narrow)
+    return dict(normalized_std=spread.tolist(),
+                update="proposal_adam" if narrow else "conditioned_fit_then_proposal_adam")
+
+
+def continue_engine(model, inputs, targets, old_inputs=(), *, protect_extremes=False):
+    settings = operating_settings(model, inputs)
+    result = {} if settings["update"] == "proposal_adam" else _fit_engine(model, inputs, targets, old_inputs, protect_extremes)
+    result['protect_prediction_extremes'] = bool(protect_extremes and settings["update"] != "proposal_adam")
+    result['history_fit_rows'] = [len(rows) for rows in old_inputs] if settings["update"] != "proposal_adam" else []
+    result["operating_settings"] = settings
     return result
